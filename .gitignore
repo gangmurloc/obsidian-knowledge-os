@@ -1,0 +1,26 @@
+# Obsidian plugin binaries / local plugin data
+.obsidian/plugins/
+
+# Obsidian machine-specific state
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+
+# Local / temporary Obsidian data
+.smart-env/
+.trash/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Large PDF originals
+_assets/PDF/
+
+# Temporary
+*.tmp
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
