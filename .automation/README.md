@@ -1,6 +1,6 @@
-# Local PDF to Markdown Pipeline
+# Knowledge OS Local Automation
 
-This pipeline converts text-layer academic PDFs into Obsidian-friendly Markdown without modifying the original PDF or calling an external service.
+This package provides local-first automation for the Vault. It currently includes PDF-to-Markdown ingestion and a localhost-only Local LLM provider layer. It does not call an external AI API.
 
 ## Environment Audit
 
@@ -9,6 +9,9 @@ This pipeline converts text-layer academic PDFs into Obsidian-friendly Markdown 
 - Also installed: Python 3.14
 - Existing PDF extraction package: none found before implementation
 - Existing PDF-to-Markdown plugin or script: none found
+- Ollama executable: not found on 2026-09-23
+- Ollama server at `http://localhost:11434`: not reachable on 2026-09-23
+- Installed Ollama models: unavailable because Ollama is not installed/running
 
 `pypdf 6.19.0` was selected because it is a maintained, production-stable, pure-Python package, supports Python 3.11, and can extract text and metadata without a cloud service. It is not OCR software. Image-only PDFs stop with `OCR required` and do not create an empty note.
 
@@ -94,6 +97,113 @@ python -m unittest discover -s ".automation\tests" -v
 ## Scope
 
 Version 1 supports PDFs with an existing text layer. It does not perform OCR, summarize papers, infer domains, or send content to an external API.
+
+## Local LLM Provider
+
+### Architecture
+
+The provider interface is under `.automation/knowledge_os/llm/` and exposes:
+
+- `health_check()`
+- `list_models()`
+- `generate()`
+
+`OllamaProvider` is the only runtime provider in v1. `FakeLLMProvider` is deterministic and test-only, so unit tests never require Ollama or network access. Requests and responses use typed dataclasses in `llm/base.py`.
+
+The runtime uses Python's standard-library HTTP client. No new package is required beyond the existing PDF dependency.
+
+### Configuration
+
+Configuration is stored at `.automation/config/local_llm.json`:
+
+```json
+{
+  "provider": "ollama",
+  "base_url": "http://localhost:11434",
+  "model": null,
+  "temperature": 0.2,
+  "timeout": 60.0
+}
+```
+
+Set `model` to the exact name shown by `ollama list`, including its tag. A missing model is an intentional blocking state: the CLI reports installed models and does not select or download one automatically.
+
+Configuration contains no API key or credential. Future programmatic config writes use a same-directory temporary file, flush and sync it, then atomically replace the destination so Google Drive cannot observe a partially written file.
+
+### Network Policy
+
+- Only `localhost`, `127.0.0.0/8`, and `::1` endpoints are accepted.
+- OpenAI, Anthropic, Gemini, OpenRouter, LAN addresses, and arbitrary internet hosts are rejected during config parsing.
+- HTTP proxy use and HTTP redirects are disabled in the Ollama transport.
+- Ollama model identifiers containing a `cloud` token are blocked.
+- Generation first verifies that the exact model appears in the local `/api/tags` result.
+- The local Ollama API requires no API key; this project does not support Ollama cloud endpoints or cloud fallback.
+
+### Install Ollama Manually on Windows
+
+Ollama is not currently installed. Do not install it from this automation. To enable the provider:
+
+1. Download and run the Windows installer from [Ollama's official Windows download page](https://ollama.com/download/windows).
+2. Open a new PowerShell window and confirm the executable:
+
+   ```powershell
+   ollama --version
+   ```
+
+3. Confirm the local server. If the Windows application has not started it, run it manually in a terminal:
+
+   ```powershell
+   ollama serve
+   ```
+
+4. In another terminal, inspect local models:
+
+   ```powershell
+   ollama list
+   ```
+
+5. Choose a local model deliberately from the [official Ollama model library](https://ollama.com/search), then download that exact model yourself:
+
+   ```powershell
+   ollama pull <model-name>
+   ```
+
+6. Put the exact installed name in `.automation/config/local_llm.json` under `model`.
+
+No model is recommended or downloaded automatically by this project.
+
+### Check Status
+
+This command performs only local version and model-list requests. It never generates text:
+
+```powershell
+$knowledgeOsPython = "$env:LOCALAPPDATA\GangilKnowledgeOS\.venv\Scripts\python.exe"
+& $knowledgeOsPython ".automation\run.py" llm-status
+```
+
+Output includes config path, provider, endpoint, reachability, server version, configured model, and installed models.
+
+### Explicit Generation Test
+
+`llm-test` is the only command in this phase that calls `generate()`. Run it explicitly after selecting a model:
+
+```powershell
+& $knowledgeOsPython ".automation\run.py" llm-test
+```
+
+Use an installed model once without changing config:
+
+```powershell
+& $knowledgeOsPython ".automation\run.py" llm-test --model "<installed-model-name>"
+```
+
+The response is printed to the terminal only. This command does not create AI-Wiki notes or write under `30_Resources/`.
+
+### Ollama API References
+
+- [Ollama API](https://docs.ollama.com/api)
+- [Ollama API source documentation](https://github.com/ollama/ollama/blob/main/docs/api.md)
+- [Ollama Windows download](https://ollama.com/download/windows)
 
 ## References
 

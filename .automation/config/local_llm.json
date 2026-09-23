@@ -1,0 +1,7 @@
+{
+  "provider": "ollama",
+  "base_url": "http://localhost:11434",
+  "model": null,
+  "temperature": 0.2,
+  "timeout": 60.0
+}

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import tempfile
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+from .io_utils import atomic_write_text
 
 
 LOGGER = logging.getLogger(__name__)
@@ -233,26 +233,10 @@ def _existing_source_matches(output_path: Path, source_path: str) -> bool:
 
 
 def _atomic_write(output_path: Path, content: str) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.exists():
-        raise OutputCollisionError(f"Output appeared during ingest: {output_path}")
-
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        dir=output_path.parent,
-        prefix=f".{output_path.name}.",
-        suffix=".tmp",
-    )
-    temporary_path = Path(temporary_name)
     try:
-        with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if output_path.exists():
-            raise OutputCollisionError(f"Output appeared during ingest: {output_path}")
-        os.replace(temporary_path, output_path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+        atomic_write_text(output_path, content, overwrite=False)
+    except FileExistsError as exc:
+        raise OutputCollisionError(f"Output appeared during ingest: {output_path}") from exc
 
 
 def ingest_paper(
