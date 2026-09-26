@@ -9,11 +9,10 @@ This package provides local-first automation for the Vault. It currently include
 - Also installed: Python 3.14
 - Existing PDF extraction package: none found before implementation
 - Existing PDF-to-Markdown plugin or script: none found
-- Ollama executable: not found on 2026-09-23
-- Ollama server at `http://localhost:11434`: not reachable on 2026-09-23
-- Installed Ollama models: unavailable because Ollama is not installed/running
+- Initial audit on 2026-09-23: Ollama was not installed or reachable.
+- User-confirmed state on 2026-09-26: localhost Ollama, configured model, `llm-status`, and `llm-test` are working.
 
-`pypdf 6.19.0` was selected because it is a maintained, production-stable, pure-Python package, supports Python 3.11, and can extract text and metadata without a cloud service. It is not OCR software. Image-only PDFs stop with `OCR required` and do not create an empty note.
+`pypdf 6.19.0` handles local PDF text extraction. `PyYAML 6.0.3` parses Obsidian frontmatter with `safe_load` so malformed YAML and property types can be rejected before Source content reaches the LLM. Neither package uses a cloud service. Image-only PDFs stop with `OCR required` and do not create an empty note.
 
 ## Paths
 
@@ -199,14 +198,76 @@ Use an installed model once without changing config:
 
 The response is printed to the terminal only. This command does not create AI-Wiki notes or write under `30_Resources/`.
 
-### Ollama API References
+## AI-Wiki Knowledge Processing
+
+### Processing Boundary
+
+The v1 processing path is:
+
+```text
+30_Resources/Sources/{Papers,Web}/*.md
+  -> frontmatter validation
+  -> section/paragraph-aware chunks
+  -> localhost LLM structured JSON
+  -> deterministic identity and merge plan
+  -> dry-run or explicit atomic write
+  -> 30_Resources/AI-Wiki/*.md
+```
+
+The processor reads normalized Markdown only. It does not reopen PDF or HTML originals. It never writes Sources, Knowledge, Projects, Areas, Ideas, Decisions, or notes with `origin: me`. It never assigns `understood`, `applied`, or `human_verified: true`.
+
+Each AI-Wiki note uses `origin: ai`, `knowledge_status: processed`, `human_verified: false`, a `sources` Wikilink list, visible `## Sources`, and visible `## Provenance`. Existing valid provenance is retained when another Source supports or extends a concept.
+
+### Structured Extraction
+
+Concept extraction passes a strict JSON schema through Ollama's `format` field and sends `think: false`. Reasoning output is neither requested nor stored. Unknown fields, missing fields, malformed JSON, invalid titles, and oversized values are rejected. Raw model values cannot directly control filenames, YAML, or Wikilinks.
+
+Source content is split at section and paragraph boundaries before sentence or fixed-length fallback splitting. The default maximum is 12,000 characters with a small paragraph overlap. State stores only Source SHA-256 hashes, chunk identifiers, and normalized concept identities under `.automation/state/ai_wiki.json`; Source Markdown remains authoritative.
+
+### Dry-Run Commands
+
+Dry-run is the default and writes neither AI-Wiki notes nor state:
+
+```powershell
+python ".automation\run.py" ai-wiki scan --source "attention_is_all_you_need.md"
+python ".automation\run.py" ai-wiki scan --papers
+python ".automation\run.py" ai-wiki scan --web
+python ".automation\run.py" ai-wiki scan --all
+python ".automation\run.py" ai-wiki scan --changed
+```
+
+The plan reports processed and skipped Sources, new concepts, updates with `supports`, `extends`, or `contradicts` relation, unchanged concepts, removed Sources, warnings, and failures. Removed Sources are report-only and never cause AI-Wiki deletion.
+
+### Explicit Write
+
+Add `--write` only after reviewing the dry-run:
+
+```powershell
+python ".automation\run.py" ai-wiki scan --source "attention_is_all_you_need.md" --write
+```
+
+AI-Wiki and state files use a same-directory temporary file, flush, `fsync`, and atomic replace. A failure cannot expose partial Markdown and does not delete the previous note.
+
+Related concepts link only when the target concept already exists or is part of the current accepted plan. Other names remain plain `(suggested)` text and do not trigger recursive generation.
+
+### Known Limitations
+
+- Concept identity handles deterministic spelling, case, whitespace, and hyphen variants; it does not perform semantic ontology matching.
+- `supports`, `extends`, and `contradicts` comparison is conservative and lexical. Subtle contradictions remain warnings for human review rather than triggering automatic replacement.
+- Extraction is limited to 8 concepts per chunk and 12 unique concepts per Source.
+- v1 does not write the optional processing report, perform OCR, classify PARA notes, or delete stale AI-Wiki content.
+
+## Ollama API References
 
 - [Ollama API](https://docs.ollama.com/api)
 - [Ollama API source documentation](https://github.com/ollama/ollama/blob/main/docs/api.md)
 - [Ollama Windows download](https://ollama.com/download/windows)
+- [Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs)
+- [Ollama thinking controls](https://docs.ollama.com/capabilities/thinking)
 
 ## References
 
 - [pypdf installation](https://pypdf.readthedocs.io/en/stable/user/installation.html)
 - [pypdf text extraction](https://pypdf.readthedocs.io/en/stable/user/extract-text.html)
 - [pypdf on PyPI](https://pypi.org/project/pypdf/)
+- [PyYAML on PyPI](https://pypi.org/project/PyYAML/)

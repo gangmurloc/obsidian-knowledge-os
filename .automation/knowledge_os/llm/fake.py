@@ -20,12 +20,15 @@ class FakeLLMProvider(LLMProvider):
         models: tuple[str, ...] = ("fake-local:latest",),
         default_model: str | None = "fake-local:latest",
         response_text: str = "FAKE_RESPONSE",
+        response_texts: tuple[str, ...] | None = None,
         reachable: bool = True,
     ) -> None:
         self._models = models
         self._default_model = default_model
         self._response_text = response_text
+        self._response_texts = list(response_texts) if response_texts is not None else None
         self._reachable = reachable
+        self.requests: list[GenerateRequest] = []
 
     @property
     def name(self) -> str:
@@ -48,6 +51,7 @@ class FakeLLMProvider(LLMProvider):
         return [ModelInfo(name=name) for name in self._models]
 
     def generate(self, request: GenerateRequest) -> GenerateResponse:
+        self.requests.append(request)
         model = request.model or self._default_model
         if not model:
             names = ", ".join(self._models) or "(none)"
@@ -61,9 +65,15 @@ class FakeLLMProvider(LLMProvider):
             )
         if not request.prompt.strip():
             raise ValueError("prompt must not be empty")
+        if self._response_texts is not None:
+            if not self._response_texts:
+                raise RuntimeError("FakeLLMProvider has no scripted response remaining.")
+            response_text = self._response_texts.pop(0)
+        else:
+            response_text = self._response_text
         return GenerateResponse(
             provider=self.name,
             model=model,
-            text=self._response_text,
+            text=response_text,
             done=True,
         )

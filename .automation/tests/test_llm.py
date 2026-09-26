@@ -157,6 +157,33 @@ class LocalLLMTests(unittest.TestCase):
             provider.generate(GenerateRequest(prompt="test", timeout=1.5))
         self.assertEqual(transport.calls[-1]["timeout"], 1.5)
 
+    def test_structured_output_and_thinking_policy_reach_ollama_payload(self):
+        schema = {"type": "object", "properties": {"concepts": {"type": "array"}}}
+        transport = RecordingTransport(
+            [
+                {"models": [{"name": "local-a:latest"}]},
+                {
+                    "model": "local-a:latest",
+                    "response": '{"concepts": []}',
+                    "done": True,
+                },
+            ]
+        )
+        provider = OllamaProvider(
+            LLMConfig(model="local-a:latest"),
+            transport=transport,
+        )
+        provider.generate(
+            GenerateRequest(
+                prompt="test",
+                response_format=schema,
+                think=False,
+            )
+        )
+        payload = transport.calls[-1]["payload"]
+        self.assertEqual(payload["format"], schema)
+        self.assertIs(payload["think"], False)
+
     def test_config_parsing_and_atomic_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "local_llm.json"

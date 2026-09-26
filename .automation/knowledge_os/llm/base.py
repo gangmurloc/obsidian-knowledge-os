@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 
 class LLMError(RuntimeError):
@@ -52,6 +54,8 @@ class GenerateRequest:
     system: str | None = None
     temperature: float | None = None
     timeout: float | None = None
+    response_format: str | Mapping[str, Any] | None = None
+    think: bool | str | None = False
 
 
 @dataclass(frozen=True)

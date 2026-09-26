@@ -213,6 +213,10 @@ class OllamaProvider(LLMProvider):
         }
         if request.system:
             payload["system"] = request.system
+        if request.response_format is not None:
+            payload["format"] = request.response_format
+        if request.think is not None:
+            payload["think"] = request.think
 
         response = self._request("POST", "/api/generate", payload, timeout=timeout)
         text = response.get("response")

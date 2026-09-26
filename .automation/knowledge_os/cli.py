@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Sequence
 
+from .ai_wiki import AIWikiError, ScanScope, process_ai_wiki
 from .llm import (
     GenerateRequest,
     LLMError,
@@ -83,6 +84,36 @@ def build_parser() -> argparse.ArgumentParser:
         default="Reply with exactly: LOCAL_LLM_OK",
         help="Prompt for the explicit connectivity test.",
     )
+
+    ai_wiki = commands.add_parser(
+        "ai-wiki",
+        help="Plan or write AI-maintained concept notes from normalized Sources.",
+    )
+    ai_wiki_commands = ai_wiki.add_subparsers(dest="ai_wiki_command", required=True)
+    scan = ai_wiki_commands.add_parser(
+        "scan",
+        help="Extract concepts from new or changed Source Markdown.",
+    )
+    scope = scan.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--source", help="One Markdown filename, optionally under Papers/ or Web/.")
+    scope.add_argument("--papers", action="store_true", help="Scan paper Sources.")
+    scope.add_argument("--web", action="store_true", help="Scan web Sources.")
+    scope.add_argument("--all", action="store_true", help="Scan all Source folders.")
+    scope.add_argument(
+        "--changed",
+        action="store_true",
+        help="Scan new and changed Sources across Papers and Web.",
+    )
+    scan.add_argument(
+        "--write",
+        action="store_true",
+        help="Atomically apply the plan to AI-Wiki and processing state.",
+    )
+    scan.add_argument(
+        "--config",
+        type=Path,
+        help="Config path relative to the Vault, or an absolute path.",
+    )
     return parser
 
 
@@ -144,6 +175,69 @@ def _run_llm_test(
     return 0
 
 
+def _scan_scope(args: argparse.Namespace) -> ScanScope:
+    if args.source:
+        return ScanScope("source", args.source)
+    if args.papers:
+        return ScanScope("papers")
+    if args.web:
+        return ScanScope("web")
+    if args.all:
+        return ScanScope("all")
+    return ScanScope("changed")
+
+
+def _print_ai_wiki_plan(plan, vault_root: Path, *, write: bool) -> None:
+    print(f"mode: {'write' if write else 'dry-run'}")
+    print("processed_sources:")
+    for source in plan.processed_sources:
+        print(f"  - {source}")
+    if not plan.processed_sources:
+        print("  (none)")
+
+    categories = (
+        ("new_concepts", "create"),
+        ("existing_concepts_to_update", "update"),
+        ("unchanged_concepts", "unchanged"),
+    )
+    for label, action in categories:
+        print(f"{label}:")
+        matches = [change for change in plan.changes if change.action == action]
+        for change in matches:
+            relative = change.path.resolve().relative_to(vault_root.resolve()).as_posix()
+            relation = f" ({change.relation})" if change.relation else ""
+            print(f"  - {change.title}{relation}: {relative}")
+        if not matches:
+            print("  (none)")
+
+    for label, values in (
+        ("skipped", plan.skipped),
+        ("removed_sources", plan.removed_sources),
+        ("warnings", plan.warnings),
+        ("failures", plan.failures),
+    ):
+        print(f"{label}:")
+        for value in values:
+            print(f"  - {value}")
+        if not values:
+            print("  (none)")
+
+
+def _run_ai_wiki_scan(args: argparse.Namespace) -> int:
+    config, provider, _config_path = _load_local_provider(args.vault, args.config)
+    if not config.model:
+        raise AIWikiError("Local LLM model is not configured.")
+    plan = process_ai_wiki(
+        vault_root=args.vault,
+        provider=provider,
+        model_name=config.model,
+        scope=_scan_scope(args),
+        write=args.write,
+    )
+    _print_ai_wiki_plan(plan, args.vault, write=args.write)
+    return 5 if plan.failures else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -168,6 +262,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 model=args.model,
                 prompt=args.prompt,
             )
+        elif args.command == "ai-wiki":
+            return _run_ai_wiki_scan(args)
         else:  # pragma: no cover - argparse enforces the available commands.
             parser.error(f"Unknown command: {args.command}")
     except OCRRequiredError as exc:
@@ -179,6 +275,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LLMError as exc:
         logging.error("Local LLM operation failed: %s", exc)
         return 4
+    except AIWikiError as exc:
+        logging.error("AI-Wiki processing failed: %s", exc)
+        return 5
     except Exception:
         logging.exception("Unexpected automation failure")
         return 2
