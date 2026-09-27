@@ -17,6 +17,10 @@ class StructuredOutputError(AIWikiError):
     """The Local LLM returned output outside the extraction schema."""
 
 
+class MalformedJSONError(StructuredOutputError):
+    """The Local LLM response is not syntactically valid JSON."""
+
+
 class ProtectedNoteError(AIWikiError):
     """A target note is human-owned or otherwise outside the write boundary."""
 
@@ -83,6 +87,31 @@ class PlannedChange:
     content: str | None
 
 
+@dataclass(frozen=True)
+class RelationSuggestion:
+    subject: str
+    relation: str
+    object: str
+    reason: str
+
+
+@dataclass
+class ProcessingStats:
+    source_characters: int = 0
+    chunk_count: int = 0
+    chunk_characters: int = 0
+    maximum_chunk_size: int = 0
+    llm_calls: int = 0
+    json_repairs: int = 0
+    timeout_failures: int = 0
+
+    @property
+    def average_chunk_size(self) -> float:
+        if not self.chunk_count:
+            return 0.0
+        return self.chunk_characters / self.chunk_count
+
+
 @dataclass
 class ProcessingPlan:
     processed_sources: list[str] = field(default_factory=list)
@@ -91,7 +120,9 @@ class ProcessingPlan:
     failures: list[str] = field(default_factory=list)
     removed_sources: list[str] = field(default_factory=list)
     changes: list[PlannedChange] = field(default_factory=list)
+    relation_suggestions: list[RelationSuggestion] = field(default_factory=list)
     state_updates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    stats: ProcessingStats = field(default_factory=ProcessingStats)
 
     @property
     def changed_notes(self) -> list[PlannedChange]:

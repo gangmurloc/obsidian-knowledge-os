@@ -211,6 +211,14 @@ class OllamaProvider(LLMProvider):
             "stream": False,
             "options": {"temperature": temperature},
         }
+        if request.max_output_tokens is not None:
+            if (
+                isinstance(request.max_output_tokens, bool)
+                or not isinstance(request.max_output_tokens, int)
+                or request.max_output_tokens < 1
+            ):
+                raise ValueError("max_output_tokens must be a positive integer")
+            payload["options"]["num_predict"] = request.max_output_tokens
         if request.system:
             payload["system"] = request.system
         if request.response_format is not None:
@@ -222,18 +230,22 @@ class OllamaProvider(LLMProvider):
         text = response.get("response")
         response_model = response.get("model")
         done = response.get("done")
+        done_reason = response.get("done_reason")
         if not isinstance(text, str):
             raise MalformedResponseError("Ollama generate response is missing text.")
         if not isinstance(response_model, str) or not response_model:
             raise MalformedResponseError("Ollama generate response is missing model.")
         if not isinstance(done, bool):
             raise MalformedResponseError("Ollama generate response is missing done state.")
+        if done_reason is not None and not isinstance(done_reason, str):
+            raise MalformedResponseError("Ollama generate response has an invalid done reason.")
 
         return GenerateResponse(
             provider=self.name,
             model=response_model,
             text=text,
             done=done,
+            done_reason=done_reason,
             total_duration_ns=_optional_int(response.get("total_duration"), field="total_duration"),
             prompt_eval_count=_optional_int(response.get("prompt_eval_count"), field="prompt_eval_count"),
             eval_count=_optional_int(response.get("eval_count"), field="eval_count"),

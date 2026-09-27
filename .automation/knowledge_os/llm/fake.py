@@ -22,12 +22,14 @@ class FakeLLMProvider(LLMProvider):
         response_text: str = "FAKE_RESPONSE",
         response_texts: tuple[str, ...] | None = None,
         reachable: bool = True,
+        done_reason: str | None = "stop",
     ) -> None:
         self._models = models
         self._default_model = default_model
         self._response_text = response_text
         self._response_texts = list(response_texts) if response_texts is not None else None
         self._reachable = reachable
+        self._done_reason = done_reason
         self.requests: list[GenerateRequest] = []
 
     @property
@@ -76,4 +78,5 @@ class FakeLLMProvider(LLMProvider):
             model=model,
             text=response_text,
             done=True,
+            done_reason=self._done_reason,
         )

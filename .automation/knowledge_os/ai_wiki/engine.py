@@ -2,39 +2,48 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..io_utils import atomic_write_json, atomic_write_text
-from ..llm import GenerateRequest, LLMProvider
+from ..llm import GenerateRequest, LLMProvider, ProviderTimeoutError
 from .models import (
     AIWikiError,
     Concept,
     Evidence,
     ExistingConcept,
+    MalformedJSONError,
     PlannedChange,
     ProcessingPlan,
     ProtectedNoteError,
     SourceValidationError,
+    StructuredOutputError,
 )
+from .ontology import concept_exclusion_reason, suggest_relations
 from .render import classify_relation, load_existing_concept, render_concept_note
 from .schema import (
     CONCEPT_EXTRACTION_SCHEMA,
     build_extraction_prompt,
+    build_json_repair_prompt,
     concept_filename,
     concept_identity,
     merge_concepts,
     parse_concept_response,
 )
-from .source import chunk_source, load_source_note
+from .source import DEFAULT_MAX_CHUNK_CHARS, chunk_source, load_source_note
 
 
 STATE_RELATIVE_PATH = Path(".automation/state/ai_wiki.json")
 AI_WIKI_RELATIVE_PATH = Path("30_Resources/AI-Wiki")
 SOURCE_ROOT_RELATIVE_PATH = Path("30_Resources/Sources")
 MAX_CONCEPTS_PER_SOURCE = 12
+AI_WIKI_MAX_OUTPUT_TOKENS = 1_024
+DIAGNOSTICS_RELATIVE_PATH = Path(".automation/state/diagnostics")
+MAX_DIAGNOSTIC_RESPONSE_CHARS = 256_000
+THINK_BLOCK_PATTERN = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -181,6 +190,58 @@ def _assert_ai_wiki_path(path: Path, output_root: Path) -> None:
         raise ProtectedNoteError(f"invalid AI-Wiki target path: {path}")
 
 
+def _diagnostic_response_text(value: str) -> str:
+    redacted = THINK_BLOCK_PATTERN.sub("[thinking redacted]", value)
+    unclosed_think = re.search(r"<think\b[^>]*>", redacted, re.IGNORECASE)
+    if unclosed_think:
+        redacted = redacted[: unclosed_think.start()] + "[thinking redacted]"
+    if len(redacted) > MAX_DIAGNOSTIC_RESPONSE_CHARS:
+        omitted = len(redacted) - MAX_DIAGNOSTIC_RESPONSE_CHARS
+        redacted = (
+            redacted[:MAX_DIAGNOSTIC_RESPONSE_CHARS]
+            + f"\n[diagnostic truncated: {omitted} characters omitted]"
+        )
+    return redacted
+
+
+def _write_parse_diagnostic(
+    *,
+    vault_root: Path,
+    source_relative_path: str,
+    chunk_id: str,
+    model_name: str,
+    parse_error: str,
+    raw_response: str,
+    repair_raw_response: str | None,
+    repair_error: str | None,
+) -> tuple[str | None, str | None]:
+    timestamp = datetime.now(timezone.utc)
+    filename = f"{timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}_{chunk_id}.json"
+    path = vault_root / DIAGNOSTICS_RELATIVE_PATH / filename
+    payload: dict[str, Any] = {
+        "timestamp": timestamp.isoformat(),
+        "source": source_relative_path,
+        "chunk_id": chunk_id,
+        "model": model_name,
+        "parse_error": parse_error,
+        "raw_structured_response": _diagnostic_response_text(raw_response),
+        "repair": {
+            "attempted": True,
+            "succeeded": repair_error is None,
+            "error": repair_error,
+        },
+    }
+    if repair_raw_response is not None:
+        payload["repair"]["raw_structured_response"] = _diagnostic_response_text(
+            repair_raw_response
+        )
+    try:
+        atomic_write_json(path, payload, overwrite=False)
+    except OSError as exc:
+        return None, f"could not write JSON parse diagnostic: {exc}"
+    return path.relative_to(vault_root).as_posix(), None
+
+
 def process_ai_wiki(
     *,
     vault_root: Path,
@@ -189,7 +250,7 @@ def process_ai_wiki(
     scope: ScanScope,
     write: bool = False,
     today: date | None = None,
-    max_chunk_chars: int = 12_000,
+    max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
 ) -> ProcessingPlan:
     root = vault_root.resolve()
     output_root = (root / AI_WIKI_RELATIVE_PATH).resolve()
@@ -232,23 +293,104 @@ def process_ai_wiki(
             continue
 
         chunks = chunk_source(source, max_chars=max_chunk_chars)
+        plan.stats.source_characters += len(source.content)
+        plan.stats.chunk_count += len(chunks)
+        plan.stats.chunk_characters += sum(len(chunk.text) for chunk in chunks)
+        plan.stats.maximum_chunk_size = max(
+            plan.stats.maximum_chunk_size,
+            *(len(chunk.text) for chunk in chunks),
+        )
         local_candidates: dict[str, Concept] = {}
         source_failed = False
         for chunk in chunks:
             system, prompt = build_extraction_prompt(chunk)
             try:
+                plan.stats.llm_calls += 1
                 response = provider.generate(
                     GenerateRequest(
                         prompt=prompt,
                         model=model_name,
                         system=system,
                         temperature=0.0,
+                        max_output_tokens=AI_WIKI_MAX_OUTPUT_TOKENS,
                         response_format=CONCEPT_EXTRACTION_SCHEMA,
                         think=False,
                     )
                 )
-                extracted = parse_concept_response(response.text)
+                if response.done_reason == "length":
+                    raise StructuredOutputError(
+                        "Local LLM output reached the 1024-token limit; "
+                        "syntax repair was not attempted because content was truncated"
+                    )
+                try:
+                    extracted = parse_concept_response(response.text)
+                except MalformedJSONError as parse_exc:
+                    plan.stats.json_repairs += 1
+                    repair_system, repair_prompt = build_json_repair_prompt(response.text)
+                    repair_raw_response: str | None = None
+                    repair_error: str | None = None
+                    try:
+                        plan.stats.llm_calls += 1
+                        repair_response = provider.generate(
+                            GenerateRequest(
+                                prompt=repair_prompt,
+                                model=model_name,
+                                system=repair_system,
+                                temperature=0.0,
+                                max_output_tokens=AI_WIKI_MAX_OUTPUT_TOKENS,
+                                response_format=CONCEPT_EXTRACTION_SCHEMA,
+                                think=False,
+                            )
+                        )
+                        if repair_response.done_reason == "length":
+                            raise StructuredOutputError(
+                                "JSON repair output reached the 1024-token limit and was truncated"
+                            )
+                        repair_raw_response = repair_response.text
+                        extracted = parse_concept_response(repair_raw_response)
+                    except Exception as repair_exc:
+                        if isinstance(repair_exc, ProviderTimeoutError):
+                            plan.stats.timeout_failures += 1
+                        repair_error = f"{type(repair_exc).__name__}: {repair_exc}"
+                        diagnostic_path, diagnostic_error = _write_parse_diagnostic(
+                            vault_root=root,
+                            source_relative_path=source.relative_path,
+                            chunk_id=chunk.identifier,
+                            model_name=model_name,
+                            parse_error=str(parse_exc),
+                            raw_response=response.text,
+                            repair_raw_response=repair_raw_response,
+                            repair_error=repair_error,
+                        )
+                        if diagnostic_path:
+                            plan.warnings.append(
+                                f"JSON parse diagnostic: {diagnostic_path}"
+                            )
+                        if diagnostic_error:
+                            plan.warnings.append(diagnostic_error)
+                        raise StructuredOutputError(
+                            f"JSON syntax repair failed after one attempt: {repair_error}"
+                        ) from repair_exc
+
+                    diagnostic_path, diagnostic_error = _write_parse_diagnostic(
+                        vault_root=root,
+                        source_relative_path=source.relative_path,
+                        chunk_id=chunk.identifier,
+                        model_name=model_name,
+                        parse_error=str(parse_exc),
+                        raw_response=response.text,
+                        repair_raw_response=repair_raw_response,
+                        repair_error=None,
+                    )
+                    if diagnostic_path:
+                        plan.warnings.append(
+                            f"JSON syntax repaired once; diagnostic: {diagnostic_path}"
+                        )
+                    if diagnostic_error:
+                        plan.warnings.append(diagnostic_error)
             except Exception as exc:
+                if isinstance(exc, ProviderTimeoutError):
+                    plan.stats.timeout_failures += 1
                 plan.failures.append(
                     f"{source.relative_path} {chunk.identifier}: {type(exc).__name__}: {exc}"
                 )
@@ -259,6 +401,17 @@ def process_ai_wiki(
                     f"{source.relative_path} {chunk.identifier}: no concepts extracted"
                 )
             for concept in extracted:
+                exclusion_reason = concept_exclusion_reason(
+                    concept.title,
+                    source.metadata.get("title"),
+                )
+                if exclusion_reason:
+                    plan.skipped.append(
+                        f"{source.relative_path} {chunk.identifier}: "
+                        f"concept candidate {concept.title!r} excluded because it "
+                        f"{exclusion_reason}"
+                    )
+                    continue
                 _attach_provenance(concept, source.link, chunk.identifier)
                 identity = concept_identity(concept.title)
                 if identity in local_candidates:
@@ -287,6 +440,8 @@ def process_ai_wiki(
             "chunks": [chunk.identifier for chunk in chunks],
             "concepts": sorted(local_candidates),
         }
+
+    plan.relation_suggestions.extend(suggest_relations(candidates.values()))
 
     (
         existing_by_identity,

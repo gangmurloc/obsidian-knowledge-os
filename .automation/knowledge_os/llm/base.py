@@ -54,6 +54,7 @@ class GenerateRequest:
     system: str | None = None
     temperature: float | None = None
     timeout: float | None = None
+    max_output_tokens: int | None = None
     response_format: str | Mapping[str, Any] | None = None
     think: bool | str | None = False
 
@@ -64,6 +65,7 @@ class GenerateResponse:
     model: str
     text: str
     done: bool
+    done_reason: str | None = None
     total_duration_ns: int | None = None
     prompt_eval_count: int | None = None
     eval_count: int | None = None

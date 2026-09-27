@@ -12,9 +12,25 @@ from unittest.mock import patch
 AUTOMATION_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AUTOMATION_ROOT))
 
-from knowledge_os.ai_wiki import ScanScope, process_ai_wiki  # noqa: E402
-from knowledge_os.ai_wiki.schema import CONCEPT_EXTRACTION_SCHEMA  # noqa: E402
-from knowledge_os.llm import FakeLLMProvider  # noqa: E402
+from knowledge_os.ai_wiki import (  # noqa: E402
+    ScanScope,
+    StructuredOutputError,
+    process_ai_wiki,
+)
+from knowledge_os.ai_wiki.engine import AI_WIKI_MAX_OUTPUT_TOKENS  # noqa: E402
+from knowledge_os.ai_wiki.ontology import concept_identity  # noqa: E402
+from knowledge_os.ai_wiki.schema import (  # noqa: E402
+    CONCEPT_EXTRACTION_SCHEMA,
+    MAX_CONCEPTS_PER_CHUNK,
+    build_extraction_prompt,
+    parse_concept_response,
+)
+from knowledge_os.ai_wiki.source import (  # noqa: E402
+    DEFAULT_MAX_CHUNK_CHARS,
+    chunk_source,
+    load_source_note,
+)
+from knowledge_os.llm import FakeLLMProvider, ProviderTimeoutError  # noqa: E402
 
 
 def concept_value(
@@ -66,6 +82,7 @@ class AIWikiTests(unittest.TestCase):
         *,
         body: str = "Self-attention relates positions within a sequence.",
         origin: str = "external",
+        title: str = "Test Source",
         directory: Path | None = None,
     ) -> Path:
         path = (directory or self.papers) / name
@@ -75,14 +92,14 @@ class AIWikiTests(unittest.TestCase):
             f"origin: {origin}\n"
             "source_type: pdf\n"
             "knowledge_status: raw\n"
-            "title: Test Source\n"
+            f"title: {json.dumps(title, ensure_ascii=False)}\n"
             "created: 2026-09-26\n"
             "updated: 2026-09-26\n"
             "source_file: _assets/PDF/test.pdf\n"
             "domain: []\n"
             "human_verified: false\n"
             "---\n\n"
-            "# Test Source\n\n"
+            f"# {title}\n\n"
             "## Content\n\n"
             f"{body}\n\n"
             "## My Highlights\n\nUser-owned highlight must not enter extraction.\n",
@@ -106,6 +123,16 @@ class AIWikiTests(unittest.TestCase):
             today=self.today,
         )
 
+    def _diagnostics(self) -> list[Path]:
+        directory = self.vault / ".automation" / "state" / "diagnostics"
+        return sorted(directory.glob("*.json")) if directory.exists() else []
+
+    def _missing_comma_response(self) -> tuple[str, str]:
+        valid = response(concept_value("Transformer"))
+        malformed = valid.replace('", "definition"', '" "definition"', 1)
+        self.assertNotEqual(malformed, valid)
+        return malformed, valid
+
     def test_01_one_source_creates_one_concept_plan(self):
         self._source()
         provider = FakeLLMProvider(response_text=response(concept_value("Self-Attention")))
@@ -115,11 +142,11 @@ class AIWikiTests(unittest.TestCase):
         self.assertFalse((self.vault / ".automation" / "state" / "ai_wiki.json").exists())
 
     def test_02_one_source_can_extract_multiple_concepts(self):
-        self._source()
+        self._source(body=("A" * 3_500) + "\n\n" + ("B" * 3_500))
         provider = FakeLLMProvider(
-            response_text=response(
-                concept_value("Transformer"),
-                concept_value("Positional Encoding"),
+            response_texts=(
+                response(concept_value("Transformer")),
+                response(concept_value("Positional Encoding")),
             )
         )
         plan = self._run(provider)
@@ -191,20 +218,23 @@ class AIWikiTests(unittest.TestCase):
         self.assertIn("empty response", plan.failures[0])
 
     def test_09_filename_collision_is_not_auto_merged(self):
-        self._source()
+        self._source(body=("A" * 3_500) + "\n\n" + ("B" * 3_500))
         provider = FakeLLMProvider(
-            response_text=response(concept_value("A:B"), concept_value("AB"))
+            response_texts=(
+                response(concept_value("A:B")),
+                response(concept_value("AB")),
+            )
         )
         plan = self._run(provider)
         self.assertEqual(len(plan.changed_notes), 1)
         self.assertTrue(any("filename collision" in warning for warning in plan.warnings))
 
     def test_10_self_attention_title_variants_share_identity(self):
-        self._source()
+        self._source(body=("A" * 3_500) + "\n\n" + ("B" * 3_500))
         provider = FakeLLMProvider(
-            response_text=response(
-                concept_value("Self Attention", key_points=["Point one"]),
-                concept_value("Self-Attention", key_points=["Point two"]),
+            response_texts=(
+                response(concept_value("Self Attention", key_points=["Point one"])),
+                response(concept_value("Self-Attention", key_points=["Point two"])),
             )
         )
         plan = self._run(provider)
@@ -375,6 +405,394 @@ class AIWikiTests(unittest.TestCase):
         self.assertEqual(provider.requests, [])
         self.assertEqual(len(plan.skipped), 2)
         self.assertTrue(all("provenance ambiguous" in item for item in plan.skipped))
+
+    def test_26_valid_json_does_not_call_repair_or_write_diagnostic(self):
+        self._source()
+        provider = FakeLLMProvider(response_text=response(concept_value("Transformer")))
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(len(plan.changed_notes), 1)
+        self.assertEqual(self._diagnostics(), [])
+
+    def test_27_missing_comma_is_repaired_once(self):
+        self._source()
+        malformed, valid = self._missing_comma_response()
+        provider = FakeLLMProvider(response_texts=(malformed, valid))
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(len(plan.changed_notes), 1)
+        self.assertIs(provider.requests[1].think, False)
+        self.assertEqual(provider.requests[1].temperature, 0.0)
+        self.assertEqual(provider.requests[1].response_format, CONCEPT_EXTRACTION_SCHEMA)
+        self.assertEqual(len(self._diagnostics()), 1)
+        self.assertEqual(plan.stats.llm_calls, 2)
+        self.assertEqual(plan.stats.json_repairs, 1)
+        self.assertEqual(plan.stats.timeout_failures, 0)
+
+    def test_28_broken_quote_escaping_is_repaired_once(self):
+        self._source()
+        valid = response(concept_value("Transformer"))
+        malformed = valid.replace(
+            "Transformer definition",
+            'Transformer "definition"',
+            1,
+        )
+        provider = FakeLLMProvider(response_texts=(malformed, valid))
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(len(plan.changed_notes), 1)
+
+    def test_29_repair_failure_becomes_final_chunk_failure(self):
+        self._source()
+        malformed, _valid = self._missing_comma_response()
+        provider = FakeLLMProvider(response_texts=(malformed, malformed))
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(plan.changes, [])
+        self.assertIn("repair failed after one attempt", plan.failures[0])
+        self.assertEqual(len(self._diagnostics()), 1)
+
+    def test_30_schema_invalid_repair_is_rejected(self):
+        self._source()
+        malformed, _valid = self._missing_comma_response()
+        schema_invalid = json.dumps({"concepts": [{"title": "Transformer"}]})
+        provider = FakeLLMProvider(response_texts=(malformed, schema_invalid))
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(plan.changes, [])
+        self.assertIn("missing fields", plan.failures[0])
+
+    def test_31_repair_is_never_attempted_more_than_once(self):
+        self._source()
+        malformed, valid = self._missing_comma_response()
+        provider = FakeLLMProvider(response_texts=(malformed, malformed, valid))
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertTrue(plan.failures)
+
+    def test_32_diagnostic_is_created_only_for_json_parse_failure(self):
+        self._source()
+        schema_invalid = json.dumps({"concepts": [{"title": "Transformer"}]})
+        provider = FakeLLMProvider(response_text=schema_invalid)
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertTrue(plan.failures)
+        self.assertEqual(self._diagnostics(), [])
+
+    def test_33_diagnostic_does_not_modify_source_or_knowledge(self):
+        source = self._source()
+        source_before = source.read_text(encoding="utf-8")
+        knowledge = self.knowledge / "Human Note.md"
+        knowledge.write_text("---\norigin: me\n---\nHuman content.\n", encoding="utf-8")
+        knowledge_before = knowledge.read_text(encoding="utf-8")
+        malformed, valid = self._missing_comma_response()
+        provider = FakeLLMProvider(response_texts=(malformed, valid))
+        self._run(provider)
+
+        diagnostics = self._diagnostics()
+        self.assertEqual(len(diagnostics), 1)
+        diagnostic = json.loads(diagnostics[0].read_text(encoding="utf-8"))
+        self.assertEqual(
+            diagnostic["source"],
+            "30_Resources/Sources/Papers/source-one.md",
+        )
+        self.assertEqual(diagnostic["model"], "fake-local:latest")
+        self.assertIn("malformed JSON", diagnostic["parse_error"])
+        self.assertEqual(diagnostic["raw_structured_response"], malformed)
+        self.assertNotIn(str(self.vault), diagnostics[0].read_text(encoding="utf-8"))
+        self.assertEqual(source.read_text(encoding="utf-8"), source_before)
+        self.assertEqual(knowledge.read_text(encoding="utf-8"), knowledge_before)
+        self.assertEqual(list(self.ai_wiki.glob("*.md")), [])
+
+    def test_34_diagnostic_redacts_embedded_thinking_block(self):
+        self._source()
+        malformed, valid = self._missing_comma_response()
+        with_thinking = f"<think>private reasoning trace</think>{malformed}"
+        provider = FakeLLMProvider(response_texts=(with_thinking, valid))
+        self._run(provider)
+        diagnostic = self._diagnostics()[0].read_text(encoding="utf-8")
+        self.assertIn("[thinking redacted]", diagnostic)
+        self.assertNotIn("private reasoning trace", diagnostic)
+
+    def test_35_long_source_uses_four_thousand_character_chunks(self):
+        body = "\n\n".join(
+            f"Paragraph {index} " + (str(index) * 1_480)
+            for index in range(1, 10)
+        )
+        path = self._source(body=body)
+        source = load_source_note(path, self.vault)
+        chunks = chunk_source(source)
+        self.assertGreater(len(source.content), 12_000)
+        self.assertGreaterEqual(len(chunks), 3)
+        self.assertTrue(all(len(chunk.text) <= DEFAULT_MAX_CHUNK_CHARS for chunk in chunks))
+
+    def test_36_chunking_prefers_complete_paragraph_boundaries(self):
+        paragraphs = [character * 1_800 for character in "ABCD"]
+        path = self._source(body="\n\n".join(paragraphs))
+        source = load_source_note(path, self.vault)
+        chunks = chunk_source(source)
+        self.assertEqual(chunks[0].text, "\n\n".join(paragraphs[:2]))
+        self.assertTrue(all(paragraph in chunks[0].text for paragraph in paragraphs[:2]))
+        self.assertNotIn(paragraphs[2], chunks[0].text)
+
+    def test_37_more_than_one_concept_in_one_chunk_is_rejected(self):
+        self._source()
+        values = [concept_value(f"Concept {index}") for index in range(2)]
+        provider = FakeLLMProvider(response_text=response(*values))
+        plan = self._run(provider)
+        self.assertEqual(MAX_CONCEPTS_PER_CHUNK, 1)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertIn("exceeds 1 items per chunk", plan.failures[0])
+
+    def test_38_source_level_concept_limit_remains_twelve(self):
+        body = "\n\n".join(f"Paragraph {index} " + ("X" * 3_400) for index in range(13))
+        self._source(body=body)
+        responses = tuple(
+            response(concept_value(f"Chunk {chunk} Concept"))
+            for chunk in range(13)
+        )
+        provider = FakeLLMProvider(response_texts=responses)
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 13)
+        self.assertIn("extracted 13 concepts", plan.failures[0])
+        self.assertIn("limit is 12", plan.failures[0])
+        self.assertEqual(plan.changes, [])
+
+    def test_39_array_field_upper_bounds_are_enforced(self):
+        cases = {
+            "key_points": ["point"] * 6,
+            "related_concepts": [f"Related {index}" for index in range(6)],
+            "evidence": [
+                {"claim": f"claim {index}", "source_excerpt": f"excerpt {index}"}
+                for index in range(4)
+            ],
+            "open_questions": [f"question {index}" for index in range(4)],
+            "domain": [f"domain-{index}" for index in range(4)],
+        }
+        for field, oversized in cases.items():
+            with self.subTest(field=field):
+                value = concept_value("Transformer")
+                value[field] = oversized
+                with self.assertRaises(StructuredOutputError):
+                    parse_concept_response(response(value))
+
+    def test_40_processing_statistics_reflect_chunk_workload(self):
+        body = "\n\n".join(character * 4_000 for character in "AB")
+        self._source(body=body)
+        provider = FakeLLMProvider(response_text=response(concept_value("Transformer")))
+        plan = self._run(provider)
+        self.assertEqual(plan.stats.source_characters, len(body))
+        self.assertEqual(plan.stats.chunk_count, 2)
+        self.assertLessEqual(plan.stats.maximum_chunk_size, DEFAULT_MAX_CHUNK_CHARS)
+        self.assertEqual(plan.stats.llm_calls, 2)
+        self.assertEqual(plan.stats.json_repairs, 0)
+
+    def test_41_timeout_failure_is_counted_without_retry(self):
+        self._source()
+        provider = FakeLLMProvider()
+        with patch.object(
+            provider,
+            "generate",
+            side_effect=ProviderTimeoutError("timed out after 180s"),
+        ) as generate:
+            plan = self._run(provider)
+        self.assertEqual(generate.call_count, 1)
+        self.assertEqual(plan.stats.llm_calls, 1)
+        self.assertEqual(plan.stats.timeout_failures, 1)
+        self.assertEqual(plan.stats.json_repairs, 0)
+        self.assertIn("ProviderTimeoutError", plan.failures[0])
+
+    def test_42_extraction_and_repair_use_bounded_output_budget(self):
+        self._source()
+        malformed, valid = self._missing_comma_response()
+        provider = FakeLLMProvider(response_texts=(malformed, valid))
+        plan = self._run(provider)
+        self.assertFalse(plan.failures)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertTrue(
+            all(
+                request.max_output_tokens == AI_WIKI_MAX_OUTPUT_TOKENS
+                for request in provider.requests
+            )
+        )
+
+    def test_43_length_truncation_does_not_attempt_json_repair(self):
+        self._source()
+        provider = FakeLLMProvider(
+            response_text='{"concepts":[{"title":"truncated',
+            done_reason="length",
+        )
+        plan = self._run(provider)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(plan.stats.json_repairs, 0)
+        self.assertIn("content was truncated", plan.failures[0])
+        self.assertEqual(self._diagnostics(), [])
+
+    def test_44_extraction_prompt_interpolates_source_and_schema(self):
+        marker = "UNIQUE_SOURCE_MARKER_7821"
+        path = self._source(body=marker)
+        source = load_source_note(path, self.vault)
+        chunk = chunk_source(source)[0]
+        _system, prompt = build_extraction_prompt(chunk)
+        self.assertIn(marker, prompt)
+        self.assertIn('"maxItems":1', prompt)
+        self.assertNotIn("{chunk.text}", prompt)
+        self.assertNotIn("{json.dumps", prompt)
+
+    def test_45_source_title_exact_match_is_excluded(self):
+        self._source(title="Attention Is All You Need")
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(concept_value("Attention Is All You Need"))
+            )
+        )
+        self.assertEqual(plan.changes, [])
+        self.assertTrue(any("matches the Source title" in item for item in plan.skipped))
+
+    def test_46_source_title_case_variation_is_excluded(self):
+        self._source(title="Attention Is All You Need")
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(concept_value("attention is all you need"))
+            )
+        )
+        self.assertEqual(plan.changes, [])
+
+    def test_47_source_title_punctuation_variation_is_excluded(self):
+        self._source(title="Attention Is All You Need")
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(concept_value("The Attention-Is-All-You-Need"))
+            )
+        )
+        self.assertEqual(plan.changes, [])
+
+    def test_48_source_title_substring_does_not_exclude_concept(self):
+        self._source(title="Attention Is All You Need")
+        plan = self._run(
+            FakeLLMProvider(response_text=response(concept_value("Self-Attention")))
+        )
+        self.assertEqual([change.title for change in plan.changed_notes], ["Self-Attention"])
+
+    def test_49_leading_article_variants_merge_to_canonical_title(self):
+        self._source(body=("A" * 3_500) + "\n\n" + ("B" * 3_500))
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value("The Transformer Architecture")),
+                response(concept_value("Transformer Architecture")),
+            )
+        )
+        plan = self._run(provider)
+        self.assertEqual(len(plan.changed_notes), 1)
+        change = plan.changed_notes[0]
+        self.assertEqual(change.title, "Transformer Architecture")
+        self.assertEqual(change.path.name, "Transformer Architecture.md")
+        self.assertIn("chunk-0001", change.content or "")
+        self.assertIn("chunk-0002", change.content or "")
+
+    def test_50_self_attention_variants_merge_to_hyphenated_canonical_title(self):
+        self._source(body=("A" * 3_500) + "\n\n" + ("B" * 3_500))
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value("Self Attention")),
+                response(concept_value("self-attention")),
+            )
+        )
+        plan = self._run(provider)
+        self.assertEqual(len(plan.changed_notes), 1)
+        self.assertEqual(plan.changed_notes[0].title, "Self-Attention")
+
+    def test_51_semantic_overlap_is_not_automatically_merged(self):
+        self._source(body=("A" * 3_500) + "\n\n" + ("B" * 3_500))
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value("Attention Mechanism")),
+                response(concept_value("Self-Attention Mechanism")),
+            )
+        )
+        plan = self._run(provider)
+        self.assertEqual(len(plan.changed_notes), 2)
+        self.assertEqual(len(plan.relation_suggestions), 1)
+        suggestion = plan.relation_suggestions[0]
+        self.assertEqual(suggestion.subject, "Self-Attention Mechanism")
+        self.assertEqual(suggestion.relation, "narrower_than")
+        self.assertEqual(suggestion.object, "Attention Mechanism")
+        self.assertTrue(
+            all("narrower_than" not in (change.content or "") for change in plan.changes)
+        )
+
+    def test_52_contextual_title_overlap_is_related_not_merged(self):
+        self._source(body=("A" * 3_500) + "\n\n" + ("B" * 3_500))
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value("Neural Machine Translation")),
+                response(
+                    concept_value("Attention Mechanism in Neural Machine Translation")
+                ),
+            )
+        )
+        plan = self._run(provider)
+        self.assertEqual(len(plan.changed_notes), 2)
+        self.assertEqual(plan.relation_suggestions[0].relation, "related_to")
+
+    def test_53_section_headings_are_excluded(self):
+        for heading in ("Introduction", "Results", "Discussion", "Conclusion"):
+            with self.subTest(heading=heading):
+                self._source()
+                plan = self._run(
+                    FakeLLMProvider(response_text=response(concept_value(heading)))
+                )
+                self.assertEqual(plan.changes, [])
+                self.assertTrue(any("structure heading" in item for item in plan.skipped))
+
+    def test_54_numbered_table_and_figure_headings_are_excluded(self):
+        for heading in ("Table 2 Results", "Figure 3", "Section 4 Methods"):
+            with self.subTest(heading=heading):
+                self._source()
+                plan = self._run(
+                    FakeLLMProvider(response_text=response(concept_value(heading)))
+                )
+                self.assertEqual(plan.changes, [])
+        self._source()
+        retained = self._run(
+            FakeLLMProvider(response_text=response(concept_value("Table Lookup")))
+        )
+        self.assertEqual([change.title for change in retained.changed_notes], ["Table Lookup"])
+
+    def test_55_korean_title_normalization_preserves_text_and_normalizes_spacing(self):
+        self.assertEqual(concept_identity("자기 주의 메커니즘"), concept_identity("자기-주의  메커니즘"))
+        self._source()
+        plan = self._run(
+            FakeLLMProvider(response_text=response(concept_value("자기 주의 메커니즘")))
+        )
+        self.assertEqual(plan.changed_notes[0].title, "자기 주의 메커니즘")
+
+    def test_56_existing_ai_wiki_title_and_path_are_not_renamed(self):
+        self._source()
+        target = self.ai_wiki / "The Transformer Architecture.md"
+        target.write_text(
+            "---\n"
+            "type: concept\n"
+            "origin: ai\n"
+            "knowledge_status: processed\n"
+            "domain: []\n"
+            "created: 2026-09-20\n"
+            "updated: 2026-09-20\n"
+            "sources: []\n"
+            "human_verified: false\n"
+            "---\n\n"
+            "# The Transformer Architecture\n",
+            encoding="utf-8",
+        )
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(concept_value("Transformer Architecture"))
+            ),
+            write=True,
+        )
+        self.assertEqual(plan.changed_notes[0].path, target)
+        self.assertIn("# The Transformer Architecture\n", target.read_text(encoding="utf-8"))
+        self.assertFalse((self.ai_wiki / "Transformer Architecture.md").exists())
 
 
 if __name__ == "__main__":

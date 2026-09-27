@@ -1,6 +1,7 @@
 from .engine import ScanScope, process_ai_wiki
 from .models import (
     AIWikiError,
+    MalformedJSONError,
     ProcessingPlan,
     ProtectedNoteError,
     SourceValidationError,
@@ -9,6 +10,7 @@ from .models import (
 
 __all__ = [
     "AIWikiError",
+    "MalformedJSONError",
     "ProcessingPlan",
     "ProtectedNoteError",
     "ScanScope",

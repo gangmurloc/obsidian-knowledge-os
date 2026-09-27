@@ -220,13 +220,27 @@ Each AI-Wiki note uses `origin: ai`, `knowledge_status: processed`, `human_verif
 
 ### Structured Extraction
 
-Concept extraction passes a strict JSON schema through Ollama's `format` field and sends `think: false`. Reasoning output is neither requested nor stored. Unknown fields, missing fields, malformed JSON, invalid titles, and oversized values are rejected. Raw model values cannot directly control filenames, YAML, or Wikilinks.
+Concept extraction passes a strict JSON schema through Ollama's `format` field and sends `think: false` with `temperature: 0`, regardless of the global generation temperature. Each extraction and repair request also sets Ollama `num_predict` to 1,024 through the provider's `max_output_tokens` option so a runaway structured response cannot consume the entire timeout indefinitely. Reasoning output is neither requested nor stored. Unknown fields, missing fields, invalid titles, and oversized values are rejected. Raw model values cannot directly control filenames, YAML, or Wikilinks.
 
-Source content is split at section and paragraph boundaries before sentence or fixed-length fallback splitting. The default maximum is 12,000 characters with a small paragraph overlap. State stores only Source SHA-256 hashes, chunk identifiers, and normalized concept identities under `.automation/state/ai_wiki.json`; Source Markdown remains authoritative.
+If the first response is syntactically invalid JSON, the same localhost model receives one syntax-only repair request. The repair prompt prohibits adding, removing, summarizing, or reinterpreting content and also uses `think: false`, `temperature: 0`, and the original JSON schema. The repaired value must pass the complete existing schema validator. There is no second retry.
+
+An initial JSON syntax failure writes one diagnostic JSON artifact under `.automation/state/diagnostics/`, whether repair succeeds or fails. It contains a UTC timestamp, Vault-relative Source path, chunk ID, model, parse error, and the raw structured responses. It does not contain the Source body, credentials, absolute paths, or Ollama's separate thinking field. Any embedded `<think>` block is redacted before storage. Normal successful responses and valid-but-schema-invalid responses create no diagnostic.
+
+Source content is split at section and paragraph boundaries before sentence or fixed-length fallback splitting. The default maximum is 4,000 characters with up to 200 characters of whole-paragraph overlap. Chunk size and overlap are defined once in `ai_wiki/source.py`. State stores only Source SHA-256 hashes, chunk identifiers, and normalized concept identities under `.automation/state/ai_wiki.json`; Source Markdown remains authoritative.
+
+Each chunk returns at most one central concept candidate. This keeps the nine-field structured record within the 1,024-token output budget on small local models. Per concept, v1 permits at most 5 key points, 5 related concepts, 3 evidence items, 3 open questions, and 3 domains. Source-level merge and deduplication still enforce at most 12 unique concepts. The configured 180-second timeout is retained; timeout does not trigger an automatic retry. An Ollama `done_reason` of `length` is reported as truncation and does not trigger syntax repair because missing content cannot be repaired safely.
+
+### Ontology Normalization
+
+Concept identity is deterministic and local. It applies Unicode NFKC normalization, case folding, punctuation and hyphen normalization, repeated-whitespace normalization, and conservative removal of a leading English article (`a`, `an`, or `the`). Exact normalized identities merge; lexical overlap alone never merges concepts.
+
+Canonical titles remove a leading English article and normalize established forms such as `Self-Attention`, `Multi-Head Attention`, `Scaled Dot-Product Attention`, and `Feed-Forward`. No additional LLM call is used. A candidate is excluded when its complete normalized title matches the Source title or is a generic document heading such as `Introduction`, `Results`, `Discussion`, `Conclusion`, `Table N`, `Figure N`, or `Section N`. Partial Source-title overlap is not sufficient for exclusion.
+
+Distinct candidates with conservative title overlap remain separate. The dry-run may report `narrower_than` or `related_to` under `relation_suggestions`, but these suggestions do not create Wikilinks, modify note bodies, or persist ontology edges.
 
 ### Dry-Run Commands
 
-Dry-run is the default and writes neither AI-Wiki notes nor state:
+Dry-run is the default and writes neither AI-Wiki notes nor processing state. A JSON syntax failure is the sole exception: it writes a diagnostic artifact under `.automation/state/diagnostics/` so the malformed local response can be inspected.
 
 ```powershell
 python ".automation\run.py" ai-wiki scan --source "attention_is_all_you_need.md"
@@ -236,7 +250,7 @@ python ".automation\run.py" ai-wiki scan --all
 python ".automation\run.py" ai-wiki scan --changed
 ```
 
-The plan reports processed and skipped Sources, new concepts, updates with `supports`, `extends`, or `contradicts` relation, unchanged concepts, removed Sources, warnings, and failures. Removed Sources are report-only and never cause AI-Wiki deletion.
+The plan reports processed and skipped Sources, new concepts, updates with `supports`, `extends`, or `contradicts` relation, unchanged concepts, non-writing ontology relation suggestions, removed Sources, warnings, and failures. It also prints Source characters, chunk count, average and maximum chunk size, LLM calls, JSON repairs, and timeout failures. Removed Sources are report-only and never cause AI-Wiki deletion.
 
 ### Explicit Write
 
@@ -252,9 +266,10 @@ Related concepts link only when the target concept already exists or is part of 
 
 ### Known Limitations
 
-- Concept identity handles deterministic spelling, case, whitespace, and hyphen variants; it does not perform semantic ontology matching.
+- Concept identity handles deterministic article, case, punctuation, whitespace, and hyphen variants; it does not perform semantic ontology matching.
 - `supports`, `extends`, and `contradicts` comparison is conservative and lexical. Subtle contradictions remain warnings for human review rather than triggering automatic replacement.
-- Extraction is limited to 8 concepts per chunk and 12 unique concepts per Source.
+- Extraction is limited to 1 concept per chunk and 12 unique concepts per Source.
+- The schema asks each concept for nine fields, including nested evidence. Small local models can still produce malformed JSON as output length and string escaping complexity increase; v1 keeps the schema unchanged and uses one syntax-only repair attempt.
 - v1 does not write the optional processing report, perform OCR, classify PARA notes, or delete stale AI-Wiki content.
 
 ## Ollama API References

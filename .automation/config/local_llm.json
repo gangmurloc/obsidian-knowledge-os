@@ -2,6 +2,6 @@
   "provider": "ollama",
   "base_url": "http://localhost:11434",
   "model": "qwen3.5:4b",
-  "temperature": 0.2,
-  "timeout": 60.0
+  "temperature": 0.0,
+  "timeout": 180.0
 }

@@ -166,6 +166,7 @@ class LocalLLMTests(unittest.TestCase):
                     "model": "local-a:latest",
                     "response": '{"concepts": []}',
                     "done": True,
+                    "done_reason": "length",
                 },
             ]
         )
@@ -173,9 +174,10 @@ class LocalLLMTests(unittest.TestCase):
             LLMConfig(model="local-a:latest"),
             transport=transport,
         )
-        provider.generate(
+        response = provider.generate(
             GenerateRequest(
                 prompt="test",
+                max_output_tokens=1024,
                 response_format=schema,
                 think=False,
             )
@@ -183,6 +185,20 @@ class LocalLLMTests(unittest.TestCase):
         payload = transport.calls[-1]["payload"]
         self.assertEqual(payload["format"], schema)
         self.assertIs(payload["think"], False)
+        self.assertEqual(payload["options"]["num_predict"], 1024)
+        self.assertEqual(response.done_reason, "length")
+
+    def test_invalid_output_token_limit_is_rejected_before_generation(self):
+        transport = RecordingTransport(
+            [{"models": [{"name": "local-a:latest"}]}]
+        )
+        provider = OllamaProvider(
+            LLMConfig(model="local-a:latest"),
+            transport=transport,
+        )
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            provider.generate(GenerateRequest(prompt="test", max_output_tokens=0))
+        self.assertEqual(len(transport.calls), 1)
 
     def test_config_parsing_and_atomic_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:

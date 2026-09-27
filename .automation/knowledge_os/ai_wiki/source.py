@@ -26,6 +26,8 @@ REQUIRED_SOURCE_PROPERTIES = {
     "human_verified",
 }
 SUPPORTED_SOURCE_TYPES = {"pdf", "web", "html"}
+DEFAULT_MAX_CHUNK_CHARS = 4_000
+DEFAULT_CHUNK_OVERLAP_CHARS = 200
 
 
 def parse_markdown_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -144,8 +146,8 @@ def _split_oversized_block(block: str, max_chars: int) -> list[str]:
 def chunk_source(
     source: SourceNote,
     *,
-    max_chars: int = 12_000,
-    overlap_chars: int = 400,
+    max_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    overlap_chars: int = DEFAULT_CHUNK_OVERLAP_CHARS,
 ) -> list[SourceChunk]:
     if max_chars < 1_000:
         raise ValueError("max_chars must be at least 1000")

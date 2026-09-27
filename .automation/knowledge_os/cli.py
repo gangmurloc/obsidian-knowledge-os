@@ -189,6 +189,14 @@ def _scan_scope(args: argparse.Namespace) -> ScanScope:
 
 def _print_ai_wiki_plan(plan, vault_root: Path, *, write: bool) -> None:
     print(f"mode: {'write' if write else 'dry-run'}")
+    print("statistics:")
+    print(f"  source_characters: {plan.stats.source_characters}")
+    print(f"  chunk_count: {plan.stats.chunk_count}")
+    print(f"  average_chunk_size: {plan.stats.average_chunk_size:.1f}")
+    print(f"  maximum_chunk_size: {plan.stats.maximum_chunk_size}")
+    print(f"  llm_calls: {plan.stats.llm_calls}")
+    print(f"  json_repairs: {plan.stats.json_repairs}")
+    print(f"  timeout_failures: {plan.stats.timeout_failures}")
     print("processed_sources:")
     for source in plan.processed_sources:
         print(f"  - {source}")
@@ -209,6 +217,15 @@ def _print_ai_wiki_plan(plan, vault_root: Path, *, write: bool) -> None:
             print(f"  - {change.title}{relation}: {relative}")
         if not matches:
             print("  (none)")
+
+    print("relation_suggestions:")
+    for suggestion in plan.relation_suggestions:
+        print(
+            f"  - {suggestion.subject} {suggestion.relation} {suggestion.object} "
+            f"({suggestion.reason})"
+        )
+    if not plan.relation_suggestions:
+        print("  (none)")
 
     for label, values in (
         ("skipped", plan.skipped),
