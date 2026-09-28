@@ -15,6 +15,7 @@ from .llm import (
 )
 from .llm.config import resolve_config_path
 from .paper_ingest import IngestError, OCRRequiredError, ingest_paper
+from .pdf_extractors import SUPPORTED_EXTRACTORS
 
 
 def default_vault_root() -> Path:
@@ -54,6 +55,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Explicitly extract and validate without writing Markdown (the default).",
+    )
+    write_mode.add_argument(
+        "--replace",
+        action="store_true",
+        help=(
+            "Atomically replace an existing note for the same PDF after re-extraction; "
+            "preserves user-owned sections and custom properties."
+        ),
+    )
+    ingest.add_argument(
+        "--extractor",
+        choices=SUPPORTED_EXTRACTORS,
+        default="pymupdf4llm",
+        help="Local extraction backend (default: pymupdf4llm; pypdf is legacy).",
     )
 
     llm_status = commands.add_parser(
@@ -191,17 +206,40 @@ def _print_ai_wiki_plan(plan, vault_root: Path, *, write: bool) -> None:
     print(f"mode: {'write' if write else 'dry-run'}")
     print("statistics:")
     print(f"  source_characters: {plan.stats.source_characters}")
+    print(f"  processing_characters: {plan.stats.processing_characters}")
     print(f"  chunk_count: {plan.stats.chunk_count}")
+    print(f"  included_blocks: {plan.stats.included_blocks}")
     print(f"  average_chunk_size: {plan.stats.average_chunk_size:.1f}")
     print(f"  maximum_chunk_size: {plan.stats.maximum_chunk_size}")
     print(f"  llm_calls: {plan.stats.llm_calls}")
     print(f"  json_repairs: {plan.stats.json_repairs}")
     print(f"  timeout_failures: {plan.stats.timeout_failures}")
+    print(f"  curator_calls: {plan.stats.curator_calls}")
     print("processed_sources:")
     for source in plan.processed_sources:
         print(f"  - {source}")
     if not plan.processed_sources:
         print("  (none)")
+
+    for label, values in (
+        ("included_sections", plan.included_sections),
+        ("excluded_sections", plan.excluded_sections),
+        ("excluded_tables", plan.excluded_tables),
+        ("excluded_figure_text", plan.excluded_figure_text),
+        ("formula_warnings", plan.formula_warnings),
+        ("candidate_concepts", plan.candidate_concepts),
+        ("selected_concepts", plan.selected_concepts),
+        ("dropped_concepts", plan.dropped_concepts),
+        ("duplicate_risk_groups", plan.duplicate_risk_groups),
+        ("curator_trigger_reason", plan.curator_trigger_reason),
+        ("selected_representatives", plan.selected_representatives),
+        ("dropped_aliases", plan.dropped_aliases),
+    ):
+        print(f"{label}:")
+        for value in values:
+            print(f"  - {value}")
+        if not values:
+            print("  (none)")
 
     categories = (
         ("new_concepts", "create"),
@@ -268,7 +306,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = ingest_paper(
                 pdf_argument=args.pdf,
                 vault_root=args.vault,
-                dry_run=not args.write,
+                dry_run=not (args.write or args.replace),
+                replace=args.replace,
+                extractor=args.extractor,
             )
         elif args.command == "llm-status":
             return _run_llm_status(args.vault, args.config)
@@ -303,9 +343,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "created": "CREATED",
         "exists": "UNCHANGED",
         "dry-run": "DRY RUN",
+        "dry-run-change": "DRY RUN (CHANGES FOUND)",
+        "dry-run-unchanged": "DRY RUN (UNCHANGED)",
+        "replaced": "REPLACED",
+        "unchanged": "UNCHANGED",
     }
     print(
         f"{labels[result.status]}: {result.output_path} "
-        f"(pages={result.pages}, extracted_chars={result.extracted_chars})"
+        f"(extractor={result.extractor}, pages={result.pages}, "
+        f"extracted_chars={result.extracted_chars}, warnings={len(result.warnings)})"
     )
+    if result.content_changed is not None:
+        print(f"content_changed: {str(result.content_changed).lower()}")
+        print(f"existing_chars: {result.existing_chars}")
+        print(f"candidate_chars: {result.new_chars}")
+    for warning in result.warnings:
+        page = f" page={warning.page}" if warning.page is not None else ""
+        print(f"warning: {warning.code}{page}: {warning.message}")
     return 0

@@ -18,6 +18,11 @@ from knowledge_os.ai_wiki import (  # noqa: E402
     process_ai_wiki,
 )
 from knowledge_os.ai_wiki.engine import AI_WIKI_MAX_OUTPUT_TOKENS  # noqa: E402
+from knowledge_os.ai_wiki.curator import (  # noqa: E402
+    CURATOR_SELECTION_SCHEMA,
+    MAX_FINAL_CONCEPTS,
+    detect_duplicate_risk_groups,
+)
 from knowledge_os.ai_wiki.ontology import concept_identity  # noqa: E402
 from knowledge_os.ai_wiki.schema import (  # noqa: E402
     CONCEPT_EXTRACTION_SCHEMA,
@@ -38,12 +43,14 @@ def concept_value(
     *,
     definition: str | None = None,
     key_points: list[str] | None = None,
+    role: str = "core_concept",
 ) -> dict:
     return {
         "title": title,
         "definition": definition or f"{title} definition",
         "core_idea": f"{title} core idea",
         "mechanism": f"{title} mechanism",
+        "role": role,
         "key_points": key_points or [f"{title} key point"],
         "related_concepts": ["Future Concept"],
         "evidence": [
@@ -59,6 +66,18 @@ def concept_value(
 
 def response(*concepts: dict) -> str:
     return json.dumps({"concepts": list(concepts)}, ensure_ascii=False)
+
+
+def curator_response(*identities: str) -> str:
+    return json.dumps(
+        {
+            "selected": [
+                {"identity": identity, "reason": f"Core concept {index}"}
+                for index, identity in enumerate(identities, start=1)
+            ]
+        },
+        ensure_ascii=False,
+    )
 
 
 class AIWikiTests(unittest.TestCase):
@@ -132,6 +151,20 @@ class AIWikiTests(unittest.TestCase):
         malformed = valid.replace('", "definition"', '" "definition"', 1)
         self.assertNotEqual(malformed, valid)
         return malformed, valid
+
+    def _curator_case(self, curator_text: str, *, count: int = 13):
+        body = "\n\n".join(
+            f"Paragraph {index} " + (chr(65 + index % 26) * 3_400)
+            for index in range(count)
+        )
+        source = self._source(body=body)
+        source_before = source.read_bytes()
+        extraction_responses = tuple(
+            response(concept_value(f"Chunk {index} Concept"))
+            for index in range(count)
+        )
+        provider = FakeLLMProvider(response_texts=extraction_responses + (curator_text,))
+        return source, source_before, provider, self._run(provider)
 
     def test_01_one_source_creates_one_concept_plan(self):
         self._source()
@@ -380,6 +413,13 @@ class AIWikiTests(unittest.TestCase):
         plan = self._run(FakeLLMProvider(response_text=response(value)))
         self.assertIn("missing fields", plan.failures[0])
 
+    def test_22a_invalid_concept_role_is_rejected(self):
+        self._source()
+        value = concept_value("Transformer")
+        value["role"] = "implementation_detail"
+        plan = self._run(FakeLLMProvider(response_text=response(value)))
+        self.assertIn("role must be one of", plan.failures[0])
+
     def test_23_empty_concept_list_is_valid_and_reported(self):
         self._source()
         plan = self._run(FakeLLMProvider(response_text=response()))
@@ -544,19 +584,34 @@ class AIWikiTests(unittest.TestCase):
         self.assertEqual(len(provider.requests), 1)
         self.assertIn("exceeds 1 items per chunk", plan.failures[0])
 
-    def test_38_source_level_concept_limit_remains_twelve(self):
-        body = "\n\n".join(f"Paragraph {index} " + ("X" * 3_400) for index in range(13))
-        self._source(body=body)
-        responses = tuple(
-            response(concept_value(f"Chunk {chunk} Concept"))
-            for chunk in range(13)
+    def test_38_eighteen_candidates_are_curated_to_at_most_twelve(self):
+        identities = [concept_identity(f"Chunk {index} Concept") for index in range(12)]
+        knowledge = self.knowledge / "Human Note.md"
+        knowledge.write_text("Human-owned content.\n", encoding="utf-8")
+        knowledge_before = knowledge.read_bytes()
+        source, source_before, provider, plan = self._curator_case(
+            curator_response(*identities),
+            count=18,
         )
-        provider = FakeLLMProvider(response_texts=responses)
-        plan = self._run(provider)
-        self.assertEqual(len(provider.requests), 13)
-        self.assertIn("extracted 13 concepts", plan.failures[0])
-        self.assertIn("limit is 12", plan.failures[0])
-        self.assertEqual(plan.changes, [])
+
+        self.assertEqual(MAX_FINAL_CONCEPTS, 12)
+        self.assertEqual(len(provider.requests), 19)
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertEqual(len(plan.candidate_concepts), 18)
+        self.assertEqual(len(plan.selected_concepts), 12)
+        self.assertEqual(len(plan.dropped_concepts), 6)
+        self.assertEqual(len(plan.changed_notes), 12)
+        self.assertEqual(plan.failures, [])
+        curator_request = provider.requests[-1]
+        self.assertEqual(curator_request.response_format, CURATOR_SELECTION_SCHEMA)
+        self.assertEqual(curator_request.temperature, 0.0)
+        self.assertIs(curator_request.think, False)
+        self.assertNotIn("Paragraph 0", curator_request.prompt)
+        self.assertIn("supporting_chunk_ids", curator_request.prompt)
+        self.assertIn("chunk-0001", plan.changed_notes[0].content or "")
+        self.assertEqual(source.read_bytes(), source_before)
+        self.assertEqual(knowledge.read_bytes(), knowledge_before)
+        self.assertEqual(list(self.ai_wiki.glob("*.md")), [])
 
     def test_39_array_field_upper_bounds_are_enforced(self):
         cases = {
@@ -586,6 +641,7 @@ class AIWikiTests(unittest.TestCase):
         self.assertLessEqual(plan.stats.maximum_chunk_size, DEFAULT_MAX_CHUNK_CHARS)
         self.assertEqual(plan.stats.llm_calls, 2)
         self.assertEqual(plan.stats.json_repairs, 0)
+        self.assertEqual(plan.stats.curator_calls, 0)
 
     def test_41_timeout_failure_is_counted_without_retry(self):
         self._source()
@@ -636,6 +692,10 @@ class AIWikiTests(unittest.TestCase):
         _system, prompt = build_extraction_prompt(chunk)
         self.assertIn(marker, prompt)
         self.assertIn('"maxItems":1', prompt)
+        self.assertIn("explicitly named mechanism", prompt)
+        self.assertIn("source-specific method/system entity", prompt)
+        self.assertIn("core_concept, mechanism, component", prompt)
+        self.assertNotIn("Note Construction", prompt)
         self.assertNotIn("{chunk.text}", prompt)
         self.assertNotIn("{json.dumps", prompt)
 
@@ -793,6 +853,278 @@ class AIWikiTests(unittest.TestCase):
         self.assertEqual(plan.changed_notes[0].path, target)
         self.assertIn("# The Transformer Architecture\n", target.read_text(encoding="utf-8"))
         self.assertFalse((self.ai_wiki / "Transformer Architecture.md").exists())
+
+    def test_57_processing_report_reaches_plan_without_modifying_source(self):
+        body = (
+            "### Page 1\n\n#### Method\n\nNormal method prose.\n\n"
+            "| Model | Score |\n| A | 0.9 | extra |\n\n"
+            "### Page 2\n\n[Picture text]\nBROKENFigureOCRText 12 44\n"
+            "Figure 1: A preserved caption.\n\n"
+            "The attention equation is defined as:\n\n#### Results\n\nResults prose."
+        )
+        source = self._source(body=body)
+        before = source.read_bytes()
+        provider = FakeLLMProvider(response_text=response())
+        plan = self._run(provider)
+
+        self.assertEqual(source.read_bytes(), before)
+        self.assertGreater(plan.stats.processing_characters, 0)
+        self.assertGreater(plan.stats.included_blocks, 0)
+        self.assertTrue(any("Method" in item for item in plan.included_sections))
+        self.assertTrue(any("malformed Markdown table" in item for item in plan.excluded_tables))
+        self.assertTrue(any("picture-text block" in item for item in plan.excluded_figure_text))
+        self.assertTrue(any("missing formula" in item for item in plan.formula_warnings))
+        prompt = provider.requests[0].prompt
+        self.assertNotIn("| A | 0.9 | extra |", prompt)
+        self.assertNotIn("BROKENFigureOCRText", prompt)
+        self.assertIn("Figure 1: A preserved caption.", prompt)
+
+    def test_58_curator_rejects_unknown_concept_identity(self):
+        _source, _before, provider, plan = self._curator_case(
+            curator_response("invented-concept")
+        )
+        self.assertEqual(len(provider.requests), 14)
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertIn("unknown concept identity", plan.failures[0])
+        self.assertEqual(plan.changes, [])
+
+    def test_59_curator_rejects_duplicate_selection(self):
+        identity = concept_identity("Chunk 0 Concept")
+        _source, _before, provider, plan = self._curator_case(
+            curator_response(identity, identity)
+        )
+        self.assertEqual(len(provider.requests), 14)
+        self.assertIn("duplicate concept identity", plan.failures[0])
+        self.assertEqual(plan.changes, [])
+
+    def test_60_curator_rejects_more_than_twelve_selections(self):
+        identities = [concept_identity(f"Chunk {index} Concept") for index in range(13)]
+        _source, _before, provider, plan = self._curator_case(
+            curator_response(*identities)
+        )
+        self.assertEqual(len(provider.requests), 14)
+        self.assertIn("between 1 and 12 concepts", plan.failures[0])
+        self.assertEqual(plan.changes, [])
+
+    def test_61_malformed_curator_response_fails_without_fallback(self):
+        source, source_before, provider, plan = self._curator_case('{"selected": [')
+        self.assertEqual(len(provider.requests), 14)
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertIn("MalformedJSONError", plan.failures[0])
+        self.assertEqual(plan.selected_concepts, [])
+        self.assertEqual(plan.changes, [])
+        self.assertEqual(source.read_bytes(), source_before)
+        self.assertEqual(list(self.ai_wiki.glob("*.md")), [])
+
+    def test_62_curator_timeout_fails_without_fallback(self):
+        count = 13
+        body = "\n\n".join(
+            f"Paragraph {index} " + (chr(65 + index) * 3_400)
+            for index in range(count)
+        )
+        self._source(body=body)
+        provider = FakeLLMProvider(
+            response_texts=tuple(
+                response(concept_value(f"Chunk {index} Concept"))
+                for index in range(count)
+            )
+        )
+        original_generate = provider.generate
+
+        def generate_or_timeout(request):
+            if len(provider.requests) == count:
+                raise ProviderTimeoutError("curator timed out")
+            return original_generate(request)
+
+        with patch.object(provider, "generate", side_effect=generate_or_timeout):
+            plan = self._run(provider)
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertEqual(plan.stats.timeout_failures, 1)
+        self.assertIn("source-level curator failed", plan.failures[0])
+        self.assertIn("ProviderTimeoutError", plan.failures[0])
+        self.assertEqual(plan.changes, [])
+
+    def test_63_wrapper_variants_form_duplicate_risk_group(self):
+        titles = (
+            "Agentic Memory Architecture",
+            "A-MEM Agentic Memory Architecture",
+            "A-MEM Agentic Memory Framework",
+            "A-MEM Agentic Memory System",
+        )
+        concepts = {}
+        for title in titles:
+            concept = parse_concept_response(response(concept_value(title)))[0]
+            concepts[concept_identity(concept.title)] = concept
+        groups = detect_duplicate_risk_groups(
+            concepts,
+            source_title="A-MEM: Agentic Memory for LLM Agents",
+        )
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].signature, "agentic memory")
+        self.assertEqual(set(groups[0].identities), set(concepts))
+
+    def test_64_distinct_concepts_never_form_duplicate_risk_group(self):
+        titles = (
+            "Agentic Memory",
+            "Memory Evolution",
+            "Attention",
+            "Self-Attention",
+            "Memory Retrieval",
+            "Link Generation",
+        )
+        concepts = {}
+        for title in titles:
+            concept = parse_concept_response(response(concept_value(title)))[0]
+            concepts[concept_identity(concept.title)] = concept
+        groups = detect_duplicate_risk_groups(
+            concepts,
+            source_title="A-MEM: Agentic Memory for LLM Agents",
+        )
+        self.assertEqual(groups, [])
+
+    def test_65_duplicate_risk_triggers_curator_below_twelve_candidates(self):
+        titles = (
+            "A-MEM Agentic Memory Architecture",
+            "A-MEM Agentic Memory Framework",
+            "A-MEM Agentic Memory System",
+        )
+        body = "\n\n".join(
+            f"Mechanism section {index} " + (chr(65 + index) * 3_400)
+            for index in range(len(titles))
+        )
+        source = self._source(
+            body=body,
+            title="A-MEM: Agentic Memory for LLM Agents",
+        )
+        source_before = source.read_bytes()
+        selected_identity = concept_identity(titles[0])
+        provider = FakeLLMProvider(
+            response_texts=tuple(
+                response(concept_value(title)) for title in titles
+            )
+            + (curator_response(selected_identity),)
+        )
+        plan = self._run(provider)
+
+        self.assertEqual(len(provider.requests), 4)
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertEqual(len(plan.candidate_concepts), 3)
+        self.assertEqual(len(plan.selected_concepts), 1)
+        self.assertEqual(len(plan.dropped_concepts), 2)
+        self.assertEqual(len(plan.duplicate_risk_groups), 1)
+        self.assertIn("duplicate-risk", plan.curator_trigger_reason[0])
+        self.assertEqual(len(plan.selected_representatives), 1)
+        self.assertEqual(len(plan.dropped_aliases), 2)
+        self.assertEqual([change.title for change in plan.changed_notes], [titles[0]])
+        self.assertIn("chunk-0001", plan.changed_notes[0].content or "")
+        self.assertEqual(source.read_bytes(), source_before)
+        self.assertEqual(list(self.ai_wiki.glob("*.md")), [])
+
+    def test_66_contextual_wrapper_pair_forms_duplicate_risk(self):
+        concepts = {}
+        for title in ("Note Construction", "Note Construction Mechanism"):
+            concept = parse_concept_response(response(concept_value(title)))[0]
+            concepts[concept_identity(concept.title)] = concept
+
+        groups = detect_duplicate_risk_groups(
+            concepts,
+            source_title="Composable Memory Operations",
+        )
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].signature, "note construction")
+        self.assertEqual(set(groups[0].identities), set(concepts))
+
+    def test_67_source_title_aliases_form_duplicate_risk(self):
+        concepts = {}
+        titles = (
+            "Agentic Memory Update Mechanism",
+            "A-MEM Memory Update Mechanism",
+        )
+        for title in titles:
+            concept = parse_concept_response(response(concept_value(title)))[0]
+            concepts[concept_identity(concept.title)] = concept
+
+        groups = detect_duplicate_risk_groups(
+            concepts,
+            source_title="A-MEM: Agentic Memory for LLM Agents",
+        )
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].signature, "memory update")
+        self.assertEqual(set(groups[0].identities), set(concepts))
+
+    def test_67a_single_token_base_with_contextual_wrapper_is_detected(self):
+        concepts = {}
+        for title in ("Retrieval", "Retrieval Method"):
+            concept = parse_concept_response(response(concept_value(title)))[0]
+            concepts[concept_identity(concept.title)] = concept
+
+        groups = detect_duplicate_risk_groups(
+            concepts,
+            source_title="Efficient Retrieval Study",
+        )
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].signature, "retrieval")
+
+    def test_68_distinct_memory_concepts_and_singleton_wrapper_are_unchanged(self):
+        concepts = {}
+        titles = (
+            "Memory Evolution",
+            "Agentic Memory",
+            "Selective Top-k Retrieval Mechanism",
+        )
+        for title in titles:
+            concept = parse_concept_response(response(concept_value(title)))[0]
+            concepts[concept_identity(concept.title)] = concept
+
+        groups = detect_duplicate_risk_groups(
+            concepts,
+            source_title="A-MEM: Agentic Memory for LLM Agents",
+        )
+
+        self.assertEqual(groups, [])
+
+    def test_69_baseline_and_analysis_roles_are_excluded_from_final_concepts(self):
+        cases = (
+            ("MemoryBank", "baseline"),
+            ("A-MEM Scaling Analysis", "analysis"),
+        )
+        for index, (title, role) in enumerate(cases):
+            with self.subTest(role=role):
+                source = self._source(
+                    name=f"role-{index}.md",
+                    title="A-MEM: Agentic Memory for LLM Agents",
+                )
+                source_before = source.read_bytes()
+                plan = self._run(
+                    FakeLLMProvider(
+                        response_text=response(concept_value(title, role=role))
+                    ),
+                    scope=ScanScope("source", source.name),
+                )
+
+                self.assertEqual(len(plan.candidate_concepts), 1)
+                self.assertEqual(plan.selected_concepts, [])
+                self.assertEqual(plan.changes, [])
+                self.assertIn(f"role={role}", plan.dropped_concepts[0])
+                self.assertEqual(source.read_bytes(), source_before)
+                self.assertEqual(list(self.ai_wiki.glob("*.md")), [])
+
+    def test_70_dataset_source_contribution_role_is_retained(self):
+        source = self._source(
+            title="EvalSet: A Dataset for Robust Evaluation",
+        )
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(concept_value("EvalSet", role="dataset"))
+            ),
+            scope=ScanScope("source", source.name),
+        )
+
+        self.assertEqual([change.title for change in plan.changed_notes], ["EvalSet"])
+        self.assertIn("retained because its identity", plan.selected_concepts[0])
 
 
 if __name__ == "__main__":

@@ -67,6 +67,7 @@ class Concept:
     open_questions: list[str] = field(default_factory=list)
     domain: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    role: str = "core_concept"
 
 
 @dataclass
@@ -98,12 +99,15 @@ class RelationSuggestion:
 @dataclass
 class ProcessingStats:
     source_characters: int = 0
+    processing_characters: int = 0
     chunk_count: int = 0
     chunk_characters: int = 0
     maximum_chunk_size: int = 0
+    included_blocks: int = 0
     llm_calls: int = 0
     json_repairs: int = 0
     timeout_failures: int = 0
+    curator_calls: int = 0
 
     @property
     def average_chunk_size(self) -> float:
@@ -121,6 +125,18 @@ class ProcessingPlan:
     removed_sources: list[str] = field(default_factory=list)
     changes: list[PlannedChange] = field(default_factory=list)
     relation_suggestions: list[RelationSuggestion] = field(default_factory=list)
+    included_sections: list[str] = field(default_factory=list)
+    excluded_sections: list[str] = field(default_factory=list)
+    excluded_tables: list[str] = field(default_factory=list)
+    excluded_figure_text: list[str] = field(default_factory=list)
+    formula_warnings: list[str] = field(default_factory=list)
+    candidate_concepts: list[str] = field(default_factory=list)
+    selected_concepts: list[str] = field(default_factory=list)
+    dropped_concepts: list[str] = field(default_factory=list)
+    duplicate_risk_groups: list[str] = field(default_factory=list)
+    curator_trigger_reason: list[str] = field(default_factory=list)
+    selected_representatives: list[str] = field(default_factory=list)
+    dropped_aliases: list[str] = field(default_factory=list)
     state_updates: dict[str, dict[str, Any]] = field(default_factory=dict)
     stats: ProcessingStats = field(default_factory=ProcessingStats)
 

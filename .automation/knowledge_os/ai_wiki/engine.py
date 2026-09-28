@@ -10,6 +10,15 @@ from typing import Any
 
 from ..io_utils import atomic_write_json, atomic_write_text
 from ..llm import GenerateRequest, LLMProvider, ProviderTimeoutError
+from .curator import (
+    CURATOR_SELECTION_SCHEMA,
+    MAX_FINAL_CONCEPTS,
+    build_curator_candidates,
+    build_curator_prompt,
+    derive_source_aliases,
+    detect_duplicate_risk_groups,
+    parse_curator_response,
+)
 from .models import (
     AIWikiError,
     Concept,
@@ -23,6 +32,7 @@ from .models import (
     StructuredOutputError,
 )
 from .ontology import concept_exclusion_reason, suggest_relations
+from .preprocess import AI_PROCESSING_VIEW_VERSION, build_ai_processing_view
 from .render import classify_relation, load_existing_concept, render_concept_note
 from .schema import (
     CONCEPT_EXTRACTION_SCHEMA,
@@ -39,11 +49,30 @@ from .source import DEFAULT_MAX_CHUNK_CHARS, chunk_source, load_source_note
 STATE_RELATIVE_PATH = Path(".automation/state/ai_wiki.json")
 AI_WIKI_RELATIVE_PATH = Path("30_Resources/AI-Wiki")
 SOURCE_ROOT_RELATIVE_PATH = Path("30_Resources/Sources")
-MAX_CONCEPTS_PER_SOURCE = 12
+MAX_CONCEPTS_PER_SOURCE = MAX_FINAL_CONCEPTS
 AI_WIKI_MAX_OUTPUT_TOKENS = 1_024
 DIAGNOSTICS_RELATIVE_PATH = Path(".automation/state/diagnostics")
 MAX_DIAGNOSTIC_RESPONSE_CHARS = 256_000
 THINK_BLOCK_PATTERN = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
+NORMALLY_EXCLUDED_ROLES = {"dataset", "metric", "baseline", "analysis"}
+
+
+def _chunk_section_names(text: str) -> tuple[str, ...]:
+    names: list[str] = []
+    for match in re.finditer(r"(?m)^#{1,6}[ \t]+(.+?)[ \t]*$", text):
+        title = match.group(1).strip()
+        if re.fullmatch(r"Page[ \t]+\d+", title, re.I):
+            continue
+        if title not in names:
+            names.append(title)
+    return tuple(names)
+
+
+def _is_source_contribution_role(concept: Concept, source_title: object) -> bool:
+    if concept.role not in {"dataset", "metric"}:
+        return False
+    identity = concept_identity(concept.title)
+    return identity in set(derive_source_aliases(source_title))
 
 
 @dataclass(frozen=True)
@@ -288,19 +317,61 @@ def process_ai_wiki(
             continue
 
         previous = previous_sources.get(source.relative_path)
-        if isinstance(previous, dict) and previous.get("sha256") == source.content_hash:
-            plan.skipped.append(f"{source.relative_path}: unchanged")
-            continue
-
-        chunks = chunk_source(source, max_chars=max_chunk_chars)
+        processing_view = build_ai_processing_view(source.content)
+        plan.included_sections.extend(
+            f"{source.relative_path}: {section}"
+            for section in processing_view.included_sections
+        )
+        plan.excluded_sections.extend(
+            f"{source.relative_path}: {section}"
+            for section in processing_view.excluded_sections
+        )
+        plan.excluded_tables.extend(
+            f"{source.relative_path}: {block}"
+            for block in processing_view.excluded_tables
+        )
+        plan.excluded_figure_text.extend(
+            f"{source.relative_path}: {block}"
+            for block in processing_view.excluded_figure_text
+        )
+        plan.formula_warnings.extend(
+            f"{source.relative_path}: {warning}"
+            for warning in processing_view.formula_warnings
+        )
+        for warning in processing_view.warnings:
+            plan.warnings.append(f"{source.relative_path}: {warning}")
+        chunks = chunk_source(
+            source,
+            content=processing_view.content,
+            max_chars=max_chunk_chars,
+        )
         plan.stats.source_characters += len(source.content)
+        plan.stats.processing_characters += len(processing_view.content)
+        plan.stats.included_blocks += processing_view.included_blocks
         plan.stats.chunk_count += len(chunks)
         plan.stats.chunk_characters += sum(len(chunk.text) for chunk in chunks)
-        plan.stats.maximum_chunk_size = max(
-            plan.stats.maximum_chunk_size,
-            *(len(chunk.text) for chunk in chunks),
-        )
+        if chunks:
+            plan.stats.maximum_chunk_size = max(
+                plan.stats.maximum_chunk_size,
+                *(len(chunk.text) for chunk in chunks),
+            )
+        else:
+            plan.skipped.append(
+                f"{source.relative_path}: no content remains in the AI processing view"
+            )
+            continue
+        if (
+            isinstance(previous, dict)
+            and previous.get("sha256") == source.content_hash
+            and previous.get("processing_view_version") == AI_PROCESSING_VIEW_VERSION
+        ):
+            plan.skipped.append(f"{source.relative_path}: unchanged")
+            continue
         local_candidates: dict[str, Concept] = {}
+        candidate_chunks: dict[str, set[str]] = {}
+        chunk_sections = {
+            chunk.identifier: _chunk_section_names(chunk.text) for chunk in chunks
+        }
         source_failed = False
         for chunk in chunks:
             system, prompt = build_extraction_prompt(chunk)
@@ -414,6 +485,7 @@ def process_ai_wiki(
                     continue
                 _attach_provenance(concept, source.link, chunk.identifier)
                 identity = concept_identity(concept.title)
+                candidate_chunks.setdefault(identity, set()).add(chunk.identifier)
                 if identity in local_candidates:
                     merge_concepts(local_candidates[identity], concept)
                 else:
@@ -421,12 +493,157 @@ def process_ai_wiki(
 
         if source_failed:
             continue
-        if len(local_candidates) > MAX_CONCEPTS_PER_SOURCE:
-            plan.failures.append(
-                f"{source.relative_path}: extracted {len(local_candidates)} concepts; "
-                f"the conservative limit is {MAX_CONCEPTS_PER_SOURCE}"
+
+        for identity, concept in sorted(local_candidates.items()):
+            plan.candidate_concepts.append(
+                f"{source.relative_path}: {concept.title} [{identity}] role={concept.role}"
             )
-            continue
+
+        role_selection_reasons: dict[str, str] = {}
+        for identity, concept in list(local_candidates.items()):
+            if concept.role not in NORMALLY_EXCLUDED_ROLES:
+                role_selection_reasons[identity] = f"role={concept.role}"
+                continue
+            if _is_source_contribution_role(
+                concept,
+                source.metadata.get("title"),
+            ):
+                role_selection_reasons[identity] = (
+                    f"role={concept.role}; retained because its identity is derived "
+                    "from the Source title"
+                )
+                continue
+            plan.dropped_concepts.append(
+                f"{source.relative_path}: {concept.title} [{identity}] "
+                f"(role={concept.role}; normally excluded from final concepts)"
+            )
+            del local_candidates[identity]
+            candidate_chunks.pop(identity, None)
+
+        duplicate_risk_groups = detect_duplicate_risk_groups(
+            local_candidates,
+            source_title=source.metadata.get("title"),
+        )
+        for group in duplicate_risk_groups:
+            titles = ", ".join(
+                local_candidates[identity].title for identity in group.identities
+            )
+            plan.duplicate_risk_groups.append(
+                f"{source.relative_path}: [{group.signature}] {titles} ({group.reason})"
+            )
+
+        selection_reasons: dict[str, str] = {}
+        needs_curator = (
+            len(local_candidates) > MAX_CONCEPTS_PER_SOURCE
+            or bool(duplicate_risk_groups)
+        )
+        if needs_curator:
+            trigger_reasons: list[str] = []
+            if len(local_candidates) > MAX_CONCEPTS_PER_SOURCE:
+                trigger_reasons.append(
+                    f"candidate count {len(local_candidates)} exceeds {MAX_CONCEPTS_PER_SOURCE}"
+                )
+            if duplicate_risk_groups:
+                trigger_reasons.append(
+                    f"{len(duplicate_risk_groups)} deterministic duplicate-risk group(s)"
+                )
+            plan.curator_trigger_reason.append(
+                f"{source.relative_path}: {'; '.join(trigger_reasons)}"
+            )
+            curator_candidates = build_curator_candidates(
+                local_candidates,
+                supporting_chunks=candidate_chunks,
+                chunk_sections=chunk_sections,
+            )
+            curator_system, curator_prompt = build_curator_prompt(
+                curator_candidates,
+                duplicate_risk_groups=duplicate_risk_groups,
+            )
+            try:
+                plan.stats.llm_calls += 1
+                plan.stats.curator_calls += 1
+                curator_response = provider.generate(
+                    GenerateRequest(
+                        prompt=curator_prompt,
+                        model=model_name,
+                        system=curator_system,
+                        temperature=0.0,
+                        max_output_tokens=AI_WIKI_MAX_OUTPUT_TOKENS,
+                        response_format=CURATOR_SELECTION_SCHEMA,
+                        think=False,
+                    )
+                )
+                if curator_response.done_reason == "length":
+                    raise StructuredOutputError(
+                        "Local curator output reached the 1024-token limit and was truncated"
+                    )
+                selections = parse_curator_response(
+                    curator_response.text,
+                    allowed_identities=set(local_candidates),
+                )
+            except Exception as exc:
+                if isinstance(exc, ProviderTimeoutError):
+                    plan.stats.timeout_failures += 1
+                plan.failures.append(
+                    f"{source.relative_path}: source-level curator failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                continue
+            selection_reasons = {
+                selection.identity: selection.reason for selection in selections
+            }
+            selected_identities = set(selection_reasons)
+            dropped = set(local_candidates) - selected_identities
+            all_local_candidates = local_candidates
+            for identity in sorted(dropped):
+                plan.dropped_concepts.append(
+                    f"{source.relative_path}: {local_candidates[identity].title} [{identity}]"
+                )
+            for group in duplicate_risk_groups:
+                selected_group = [
+                    identity for identity in group.identities if identity in selected_identities
+                ]
+                dropped_group = [
+                    identity for identity in group.identities if identity in dropped
+                ]
+                if selected_group:
+                    representatives = ", ".join(
+                        all_local_candidates[identity].title for identity in selected_group
+                    )
+                    plan.selected_representatives.append(
+                        f"{source.relative_path}: [{group.signature}] {representatives}"
+                    )
+                for identity in dropped_group:
+                    representative_text = (
+                        ", ".join(
+                            all_local_candidates[selected].title
+                            for selected in selected_group
+                        )
+                        if selected_group
+                        else "group not selected"
+                    )
+                    plan.dropped_aliases.append(
+                        f"{source.relative_path}: {all_local_candidates[identity].title} "
+                        f"-> {representative_text}"
+                    )
+            local_candidates = {
+                identity: local_candidates[identity]
+                for identity in selection_reasons
+            }
+        else:
+            selection_reasons = {
+                identity: (
+                    f"within source limit; curator not required; "
+                    f"{role_selection_reasons[identity]}"
+                )
+                for identity in local_candidates
+            }
+
+        for identity, reason in selection_reasons.items():
+            plan.selected_concepts.append(
+                f"{source.relative_path}: {local_candidates[identity].title} "
+                f"[{identity}] ({reason})"
+            )
 
         plan.processed_sources.append(source.relative_path)
         for identity, concept in local_candidates.items():
@@ -437,6 +654,7 @@ def process_ai_wiki(
                 candidates[identity] = concept
         plan.state_updates[source.relative_path] = {
             "sha256": source.content_hash,
+            "processing_view_version": AI_PROCESSING_VIEW_VERSION,
             "chunks": [chunk.identifier for chunk in chunks],
             "concepts": sorted(local_candidates),
         }

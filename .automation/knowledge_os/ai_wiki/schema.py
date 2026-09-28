@@ -24,11 +24,32 @@ CONCEPT_FIELDS = {
     "definition",
     "core_idea",
     "mechanism",
+    "role",
     "key_points",
     "related_concepts",
     "evidence",
     "open_questions",
     "domain",
+}
+CONCEPT_ROLES = {
+    "core_concept",
+    "mechanism",
+    "component",
+    "method_entity",
+    "dataset",
+    "metric",
+    "baseline",
+    "analysis",
+}
+ROLE_PRIORITY = {
+    "mechanism": 0,
+    "component": 1,
+    "core_concept": 2,
+    "method_entity": 3,
+    "dataset": 4,
+    "metric": 4,
+    "baseline": 5,
+    "analysis": 5,
 }
 EVIDENCE_FIELDS = {"claim", "source_excerpt"}
 DOMAIN_ALIASES = {
@@ -68,6 +89,7 @@ CONCEPT_EXTRACTION_SCHEMA: dict[str, Any] = {
                     "definition": {"type": "string", "maxLength": MAX_DEFINITION_CHARS},
                     "core_idea": {"type": "string", "maxLength": MAX_CORE_IDEA_CHARS},
                     "mechanism": {"type": "string", "maxLength": MAX_MECHANISM_CHARS},
+                    "role": {"type": "string", "enum": sorted(CONCEPT_ROLES)},
                     "key_points": {
                         "type": "array",
                         "maxItems": MAX_KEY_POINTS,
@@ -237,6 +259,11 @@ def _parse_concept(value: Any, index: int) -> Concept:
     raw_title = value["title"]
     if not isinstance(raw_title, str) or len(raw_title) > 120:
         raise StructuredOutputError(f"concepts[{index}].title must be a string up to 120 characters")
+    role = value["role"]
+    if not isinstance(role, str) or role not in CONCEPT_ROLES:
+        raise StructuredOutputError(
+            f"concepts[{index}].role must be one of: {', '.join(sorted(CONCEPT_ROLES))}"
+        )
 
     return Concept(
         title=canonicalize_concept_title(raw_title),
@@ -249,6 +276,7 @@ def _parse_concept(value: Any, index: int) -> Concept:
         mechanism=_clean_text(
             value["mechanism"], field="mechanism", max_length=MAX_MECHANISM_CHARS
         ),
+        role=role,
         key_points=_string_list(
             value["key_points"],
             field="key_points",
@@ -323,6 +351,8 @@ def merge_concepts(target: Concept, incoming: Concept) -> Concept:
         target.core_idea = incoming.core_idea
     if not target.mechanism and incoming.mechanism:
         target.mechanism = incoming.mechanism
+    if ROLE_PRIORITY[incoming.role] < ROLE_PRIORITY[target.role]:
+        target.role = incoming.role
     _append_unique(target.key_points, incoming.key_points)
     _append_unique(target.related_concepts, incoming.related_concepts)
     _append_unique(target.open_questions, incoming.open_questions)
@@ -373,11 +403,21 @@ def build_extraction_prompt(chunk: SourceChunk) -> tuple[str, str]:
 
 Rules:
 - Return zero concepts only when the chunk has no reusable concept; otherwise return exactly one.
-- Prefer the central technical concept over an exhaustive section summary.
+- Highest priority: an explicitly named mechanism, architecture component, or reusable technical concept with its own definition or process.
+- Prefer a mechanism explicitly named by the section or body over a generic name for the complete source system.
+- Prefer concepts directly required by the paper's contribution over an exhaustive section summary.
+- Treat source/system names ending in Architecture, Framework, System, Mechanism, Approach, or Method as low-priority wrapper concepts when a more precise candidate is supported.
+- Do not create multiple candidates for the same underlying system merely by changing a wrapper noun.
+- Across a Source, emit at most one source-specific method/system entity; choose a defined mechanism instead whenever the chunk supports one.
+- Set role to exactly one of: core_concept, mechanism, component, method_entity, dataset, metric, baseline, analysis.
+- Use core_concept, mechanism, or component for reusable ontology entries. Use method_entity conservatively for a named source-specific system or method.
+- Use dataset, metric, baseline, or analysis when that is the candidate's actual role. These roles are normally excluded later unless the Source itself contributes that dataset or metric.
+- Dataset names, metrics, incidental baselines, implementation details, analyses, and section titles are not reusable concepts by themselves.
 - Keep definition and core_idea concise, and mechanism focused on the essential process.
 - Return at most {MAX_KEY_POINTS} key points, {MAX_RELATED_CONCEPTS} related concepts, {MAX_EVIDENCE_ITEMS} evidence items, {MAX_OPEN_QUESTIONS} open questions, and {MAX_DOMAINS} domains per concept.
 - Do not emit section labels such as Introduction, Results, or Section 3.
 - Ignore formatting artifacts, page headers, footers, and broken tables.
+- Ignore bracketed table-of-contents, table, or formula omission markers; they are provenance notices, not concepts or evidence.
 - Do not treat titles in a References section as concepts from this source.
 - If table column relationships are unclear, do not infer them.
 - Do not assert facts that cannot be supported by the supplied chunk.

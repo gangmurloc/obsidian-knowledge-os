@@ -146,6 +146,7 @@ def _split_oversized_block(block: str, max_chars: int) -> list[str]:
 def chunk_source(
     source: SourceNote,
     *,
+    content: str | None = None,
     max_chars: int = DEFAULT_MAX_CHUNK_CHARS,
     overlap_chars: int = DEFAULT_CHUNK_OVERLAP_CHARS,
 ) -> list[SourceChunk]:
@@ -154,7 +155,8 @@ def chunk_source(
     if not 0 <= overlap_chars < max_chars:
         raise ValueError("overlap_chars must be non-negative and smaller than max_chars")
 
-    raw_blocks = [block.strip() for block in re.split(r"\n[ \t]*\n", source.content)]
+    processing_content = source.content if content is None else content
+    raw_blocks = [block.strip() for block in re.split(r"\n[ \t]*\n", processing_content)]
     blocks: list[str] = []
     for block in raw_blocks:
         if not block:

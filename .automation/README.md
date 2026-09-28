@@ -7,12 +7,14 @@ This package provides local-first automation for the Vault. It currently include
 - OS: Windows 11 Enterprise, 64-bit
 - Default Python: 3.11.9
 - Also installed: Python 3.14
-- Existing PDF extraction package: none found before implementation
-- Existing PDF-to-Markdown plugin or script: none found
+- Initial PDF extractor: `pypdf 6.19.0`
+- Current layout-aware default: `pymupdf4llm 1.28.2`
 - Initial audit on 2026-09-23: Ollama was not installed or reachable.
 - User-confirmed state on 2026-09-26: localhost Ollama, configured model, `llm-status`, and `llm-test` are working.
 
-`pypdf 6.19.0` handles local PDF text extraction. `PyYAML 6.0.3` parses Obsidian frontmatter with `safe_load` so malformed YAML and property types can be rejected before Source content reaches the LLM. Neither package uses a cloud service. Image-only PDFs stop with `OCR required` and do not create an empty note.
+`PyMuPDF4LLM 1.28.2` is the default local extractor because it preserves page chunks, headings, multi-column reading order, and Markdown tables more reliably than plain `pypdf`. `pypdf 6.19.0` remains available as the explicit legacy extractor. `PyYAML 6.0.3` parses Obsidian frontmatter with `safe_load` so malformed YAML and property types can be rejected before Source content reaches the LLM. No extractor sends PDF content to a cloud service.
+
+PyMuPDF4LLM installs its compatible PyMuPDF and PyMuPDF Layout dependencies. These packages are dual-licensed under AGPL-3.0 or a commercial license; review that license before distributing this automation outside personal use. Layout/OCR processing is local and can require substantially more disk space and compute than the legacy path.
 
 ## Paths
 
@@ -46,34 +48,46 @@ py -3.11 -m venv "$env:LOCALAPPDATA\GangilKnowledgeOS\.venv"
 
 ```powershell
 $knowledgeOsPython = "$env:LOCALAPPDATA\GangilKnowledgeOS\.venv\Scripts\python.exe"
-& $knowledgeOsPython ".automation\run.py" ingest-paper "_assets\PDF\example.pdf" --write
+& $knowledgeOsPython ".automation\run.py" ingest-paper "_assets\PDF\example.pdf" --extractor pymupdf4llm --write
 ```
 
 ## Dry Run
 
-Dry-run is the default. It still opens and extracts the PDF so it can detect image-only files, but it writes nothing. The explicit `--dry-run` flag is accepted for clarity.
+Dry-run is the default. It opens and extracts the PDF, runs quality checks, and writes nothing. If the Source note already exists, dry-run compares the candidate against it and reports whether content would change. The explicit `--dry-run` flag is accepted for clarity.
 
 ```powershell
 $knowledgeOsPython = "$env:LOCALAPPDATA\GangilKnowledgeOS\.venv\Scripts\python.exe"
-& $knowledgeOsPython ".automation\run.py" ingest-paper "_assets\PDF\example.pdf" --dry-run
+& $knowledgeOsPython ".automation\run.py" ingest-paper "_assets\PDF\example.pdf" --extractor pymupdf4llm --dry-run
+```
+
+Use the legacy extractor only for regression comparison or a document that works better with it:
+
+```powershell
+& $knowledgeOsPython ".automation\run.py" ingest-paper "_assets\PDF\example.pdf" --extractor pypdf --dry-run
+```
+
+`--write` creates a new Source and never overwrites an existing note. After reviewing a changed dry-run, `--replace` atomically updates the matching Source while preserving custom frontmatter plus `My Highlights` and `Related`:
+
+```powershell
+& $knowledgeOsPython ".automation\run.py" ingest-paper "_assets\PDF\example.pdf" --extractor pymupdf4llm --replace
 ```
 
 ## Expected Output
 
 ```text
-DRY RUN: G:\...\30_Resources\Sources\Papers\example.md (pages=12, extracted_chars=28431)
+DRY RUN: G:\...\example.md (extractor=pymupdf4llm, pages=12, extracted_chars=28431, warnings=0)
 ```
 
 On a real run:
 
 ```text
-CREATED: G:\...\30_Resources\Sources\Papers\example.md (pages=12, extracted_chars=28431)
+CREATED: G:\...\example.md (extractor=pymupdf4llm, pages=12, extracted_chars=28431, warnings=0)
 ```
 
 Running the same source again does not overwrite the Markdown note:
 
 ```text
-UNCHANGED: G:\...\30_Resources\Sources\Papers\example.md (pages=0, extracted_chars=0)
+UNCHANGED: G:\...\example.md (extractor=pymupdf4llm, pages=0, extracted_chars=0, warnings=0)
 ```
 
 ## Failure Behavior
@@ -82,12 +96,14 @@ UNCHANGED: G:\...\30_Resources\Sources\Papers\example.md (pages=0, extracted_cha
 - Encrypted or unreadable PDFs exit with code `2` and create no note.
 - Image-only or low-text PDFs exit with code `3`, log `OCR required`, and create no note.
 - Filename collisions never overwrite an existing note.
+- Existing matching Sources require the explicit `--replace` flag and are replaced atomically.
 - Writes use a temporary file followed by an atomic replace in the destination directory.
 - Extracted angle brackets are encoded only inside the PDF Content body to avoid raw-HTML parsing.
+- Extraction warnings identify suspected reading-order, joined-word, table, formula, rotated-text, or extractor problems by PDF page. They request review; they do not silently discard Source content.
 
 ## Test
 
-The tests use mocks and a tiny fake PDF marker; no large PDF fixture is stored.
+The tests use mocks and tiny synthetic fixtures; no user paper or large PDF fixture is read.
 
 ```powershell
 python -m unittest discover -s ".automation\tests" -v
@@ -95,7 +111,7 @@ python -m unittest discover -s ".automation\tests" -v
 
 ## Scope
 
-Version 1 supports PDFs with an existing text layer. It does not perform OCR, summarize papers, infer domains, or send content to an external API.
+Version 1 prioritizes local layout-aware extraction. PyMuPDF4LLM may use its local OCR path when available; low-text output still fails instead of creating an empty Source. Ingestion does not summarize papers, infer domains, or send content to an external API.
 
 ## Local LLM Provider
 
@@ -207,6 +223,7 @@ The v1 processing path is:
 ```text
 30_Resources/Sources/{Papers,Web}/*.md
   -> frontmatter validation
+  -> non-destructive AI processing view
   -> section/paragraph-aware chunks
   -> localhost LLM structured JSON
   -> deterministic identity and merge plan
@@ -214,7 +231,11 @@ The v1 processing path is:
   -> 30_Resources/AI-Wiki/*.md
 ```
 
-The processor reads normalized Markdown only. It does not reopen PDF or HTML originals. It never writes Sources, Knowledge, Projects, Areas, Ideas, Decisions, or notes with `origin: me`. It never assigns `understood`, `applied`, or `human_verified: true`.
+The processor reads normalized Markdown only. It does not reopen PDF or HTML originals. Before chunking, it builds an in-memory processing view that excludes References/Bibliography, the NeurIPS Paper Checklist, and Contents/Table of Contents sections. Section names are compared after inline Markdown, HTML entities/tags, punctuation, case, and whitespace normalization. Exclusion ends only at the next heading of the same or higher level. Appendices, Related Work, Limitations, Experiment, Methodology, normal prose, figure captions, and structurally valid GFM tables remain available.
+
+Malformed tables, excessive numeric-density rows, raw picture/OCR text, probable joined-word OCR blocks, flattened formulas, and a missing formula after an explicit formula-introducing sentence become page-linked omission markers. These markers tell the LLM not to reconstruct missing content. Filtering never writes the processing view back to the Source Markdown.
+
+It never writes Sources, Knowledge, Projects, Areas, Ideas, Decisions, or notes with `origin: me`. It never assigns `understood`, `applied`, or `human_verified: true`.
 
 Each AI-Wiki note uses `origin: ai`, `knowledge_status: processed`, `human_verified: false`, a `sources` Wikilink list, visible `## Sources`, and visible `## Provenance`. Existing valid provenance is retained when another Source supports or extends a concept.
 
@@ -226,9 +247,17 @@ If the first response is syntactically invalid JSON, the same localhost model re
 
 An initial JSON syntax failure writes one diagnostic JSON artifact under `.automation/state/diagnostics/`, whether repair succeeds or fails. It contains a UTC timestamp, Vault-relative Source path, chunk ID, model, parse error, and the raw structured responses. It does not contain the Source body, credentials, absolute paths, or Ollama's separate thinking field. Any embedded `<think>` block is redacted before storage. Normal successful responses and valid-but-schema-invalid responses create no diagnostic.
 
-Source content is split at section and paragraph boundaries before sentence or fixed-length fallback splitting. The default maximum is 4,000 characters with up to 200 characters of whole-paragraph overlap. Chunk size and overlap are defined once in `ai_wiki/source.py`. State stores only Source SHA-256 hashes, chunk identifiers, and normalized concept identities under `.automation/state/ai_wiki.json`; Source Markdown remains authoritative.
+The processing view is split at section and paragraph boundaries before sentence or fixed-length fallback splitting. The default maximum is 4,000 characters with up to 200 characters of whole-paragraph overlap. Chunk size and overlap are defined once in `ai_wiki/source.py`. State stores the processing-view version, Source SHA-256 hashes, chunk identifiers, and normalized concept identities under `.automation/state/ai_wiki.json`; Source Markdown remains authoritative.
 
-Each chunk returns at most one central concept candidate. This keeps the nine-field structured record within the 1,024-token output budget on small local models. Per concept, v1 permits at most 5 key points, 5 related concepts, 3 evidence items, 3 open questions, and 3 domains. Source-level merge and deduplication still enforce at most 12 unique concepts. The configured 180-second timeout is retained; timeout does not trigger an automatic retry. An Ollama `done_reason` of `length` is reported as truncation and does not trigger syntax repair because missing content cannot be repaired safely.
+Each chunk returns at most one central concept candidate. This keeps the structured record within the 1,024-token output budget on small local models. Each candidate also has one selection-only `role`: `core_concept`, `mechanism`, `component`, `method_entity`, `dataset`, `metric`, `baseline`, or `analysis`. The role is not persisted to AI-Wiki Markdown. Per concept, v1 permits at most 5 key points, 5 related concepts, 3 evidence items, 3 open questions, and 3 domains. Deterministic identity deduplication followed by source-level selection keeps at most 12 final concepts. The configured 180-second timeout is retained; timeout does not trigger an automatic retry. An Ollama `done_reason` of `length` is reported as truncation and does not trigger syntax repair because missing content cannot be repaired safely.
+
+### Source-Level Concept Selection
+
+Chunk extraction prioritizes explicitly named mechanisms, architecture components, and reusable concepts with their own definition or process. `core_concept`, `mechanism`, and `component` are kept by default; `method_entity` is conservative. `dataset`, `metric`, `baseline`, and `analysis` are normally excluded before curation. A dataset or metric is retained when its identity is clearly derived from the Source title, allowing papers that introduce those artifacts to represent their actual contribution. Source/system-name variants and contextual wrapper nouns such as Architecture, Framework, System, Mechanism, Approach, and Method are lower priority when a more precise candidate exists.
+
+After deterministic identity deduplication, a Source invokes the curator when it has more than 12 candidates or when a deterministic duplicate-risk group exists. Duplicate risk is a review signal based on coexisting titles that become equal only after contextual wrapper comparison or comparison with aliases derived from the Source title. Wrapper words are never removed from stored identities or singleton candidates, and aliases are never used for renaming or automatic merging. A clean Source with at most 12 candidates makes no curator request. A triggered Source makes exactly one curator request with `think: false` and `temperature: 0`. The request contains only candidate titles, roles, shortened definitions and core ideas, supporting chunk IDs, available section names, evidence counts, and duplicate-risk groups; it does not resend the Source body.
+
+The curator may select up to 12 exact identities and provide a short reason. For a clear contextual alias group it should retain one representative, but when identity is uncertain it may keep candidates separate. A broad concept and a named subprocess, a base mechanism and a qualified variant, or mechanisms sharing only a domain word remain distinct. The curator cannot create, rename, merge, or modify concepts. Unknown identities, duplicate selections, more than 12 selections, malformed JSON, schema violations, truncation, and timeout fail that Source without selecting the first 12 or applying another fallback. Existing deterministic identity normalization remains the only automatic merge rule, and selected Concept objects retain their original evidence and provenance.
 
 ### Ontology Normalization
 
@@ -250,7 +279,7 @@ python ".automation\run.py" ai-wiki scan --all
 python ".automation\run.py" ai-wiki scan --changed
 ```
 
-The plan reports processed and skipped Sources, new concepts, updates with `supports`, `extends`, or `contradicts` relation, unchanged concepts, non-writing ontology relation suggestions, removed Sources, warnings, and failures. It also prints Source characters, chunk count, average and maximum chunk size, LLM calls, JSON repairs, and timeout failures. Removed Sources are report-only and never cause AI-Wiki deletion.
+The plan reports processed and skipped Sources, new concepts, updates with `supports`, `extends`, or `contradicts` relation, unchanged concepts, non-writing ontology relation suggestions, removed Sources, warnings, and failures. Processing diagnostics list included and excluded sections, included block count, excluded tables, excluded figure text, formula warnings, Source and processing character counts, and chunk count. Concept-selection diagnostics list all candidates, selected and dropped concepts, duplicate-risk groups, curator trigger reasons, selected representatives, dropped aliases, and curator call count. An unchanged Source still receives local preprocessing diagnostics but does not call the LLM. Removed Sources are report-only and never cause AI-Wiki deletion.
 
 ### Explicit Write
 
@@ -268,9 +297,10 @@ Related concepts link only when the target concept already exists or is part of 
 
 - Concept identity handles deterministic article, case, punctuation, whitespace, and hyphen variants; it does not perform semantic ontology matching.
 - `supports`, `extends`, and `contradicts` comparison is conservative and lexical. Subtle contradictions remain warnings for human review rather than triggering automatic replacement.
-- Extraction is limited to 1 concept per chunk and 12 unique concepts per Source.
+- Extraction is limited to 1 concept per chunk and 12 selected concepts per Source; Sources with more candidates depend on one local curator call.
 - The schema asks each concept for nine fields, including nested evidence. Small local models can still produce malformed JSON as output length and string escaping complexity increase; v1 keeps the schema unchanged and uses one syntax-only repair attempt.
-- v1 does not write the optional processing report, perform OCR, classify PARA notes, or delete stale AI-Wiki content.
+- Layout heuristics are conservative but cannot guarantee correct reading order, tables, or formulas for every publisher PDF. Review extraction warnings and the dry-run before replacement.
+- v1 does not write the optional processing report, classify PARA notes, or delete stale AI-Wiki content.
 
 ## Ollama API References
 
@@ -285,4 +315,6 @@ Related concepts link only when the target concept already exists or is part of 
 - [pypdf installation](https://pypdf.readthedocs.io/en/stable/user/installation.html)
 - [pypdf text extraction](https://pypdf.readthedocs.io/en/stable/user/extract-text.html)
 - [pypdf on PyPI](https://pypi.org/project/pypdf/)
+- [PyMuPDF4LLM documentation](https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/)
+- [PyMuPDF4LLM on PyPI](https://pypi.org/project/pymupdf4llm/)
 - [PyYAML on PyPI](https://pypi.org/project/PyYAML/)
