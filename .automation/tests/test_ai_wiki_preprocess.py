@@ -13,12 +13,45 @@ sys.path.insert(0, str(AUTOMATION_ROOT))
 from knowledge_os.ai_wiki.preprocess import (  # noqa: E402
     build_ai_processing_view,
     canonicalize_heading_text,
+    detect_methodology_subsections,
 )
 from knowledge_os.ai_wiki.models import ProcessingPlan  # noqa: E402
 from knowledge_os.cli import _print_ai_wiki_plan  # noqa: E402
 
 
 class AIWikiPreprocessTests(unittest.TestCase):
+    def test_named_methodology_subsections_are_detected(self):
+        content = (
+            "### Page 1\n\n#### 3 Methodology\n\n"
+            "##### 3.1 State Construction\n\nDefined mechanism.\n\n"
+            "##### 3.2 Dynamic Routing\n\nDefined mechanism.\n\n"
+            "#### 4 Results\n\nResult text."
+        )
+        self.assertEqual(
+            detect_methodology_subsections(content),
+            ("state construction", "dynamic routing"),
+        )
+
+    def test_flattened_numbered_methodology_hierarchy_is_detected(self):
+        content = (
+            "### Page 1\n\n#### 3 Methodolodgy\n\n"
+            "#### 3.1 State Construction\n\nDefined mechanism.\n\n"
+            "#### 3.2 Dynamic Routing\n\nDefined mechanism.\n\n"
+            "#### 4 Experiment\n\nExperiment text."
+        )
+        self.assertEqual(
+            detect_methodology_subsections(content),
+            ("state construction", "dynamic routing"),
+        )
+
+    def test_experiment_subsections_are_not_methodology_signals(self):
+        content = (
+            "### Page 1\n\n#### 4 Experiment\n\n"
+            "##### 4.1 Dataset and Evaluation\n\nDataset text.\n\n"
+            "##### 4.2 Implementation Details\n\nImplementation text."
+        )
+        self.assertEqual(detect_methodology_subsections(content), ())
+
     def test_heading_canonicalization_removes_inline_formatting(self):
         cases = {
             "**References**": "references",
@@ -236,6 +269,9 @@ class AIWikiPreprocessTests(unittest.TestCase):
         plan.excluded_tables.append("source.md: malformed Markdown table (PDF p.4)")
         plan.excluded_figure_text.append("source.md: picture-text block (PDF p.5)")
         plan.formula_warnings.append("source.md: malformed formula (PDF p.6)")
+        plan.methodology_subsections.append("source.md: state construction")
+        plan.quality_gate_status = "failed"
+        plan.quality_gate_reasons.append("source.md: test quality reason")
         output = StringIO()
         with redirect_stdout(output):
             _print_ai_wiki_plan(plan, Path.cwd(), write=False)
@@ -250,6 +286,10 @@ class AIWikiPreprocessTests(unittest.TestCase):
             "excluded_tables:",
             "excluded_figure_text:",
             "formula_warnings:",
+            "methodology_subsections:",
+            "quality_gate:",
+            "status: failed",
+            "test quality reason",
             "curator_calls: 0",
             "candidate_concepts:",
             "selected_concepts:",

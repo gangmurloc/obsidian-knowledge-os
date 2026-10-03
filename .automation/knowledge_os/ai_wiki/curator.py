@@ -66,6 +66,7 @@ class CuratorCandidate:
     source_sections: tuple[str, ...]
     evidence_count: int
     role: str = "core_concept"
+    is_primary_source_entity: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,27 @@ def _duplicate_signatures(
                 alias_changed=True,
             )
     return variants
+
+
+def concept_comparison_signatures(
+    title_or_identity: str, *, source_title: object
+) -> set[str]:
+    identity = concept_identity(title_or_identity)
+    aliases = derive_source_aliases(source_title)
+    return {
+        " ".join(signature)
+        for signature in _duplicate_signatures(identity, source_aliases=aliases)
+    }
+
+
+def is_source_branded_identity(identity: str, *, source_title: object) -> bool:
+    tokens = tuple(concept_identity(identity).split())
+    return any(
+        len(tokens) >= len(alias_tokens)
+        and tokens[: len(alias_tokens)] == alias_tokens
+        for alias in derive_source_aliases(source_title)
+        if (alias_tokens := tuple(alias.split()))
+    )
 
 
 def detect_duplicate_risk_groups(
@@ -247,6 +269,7 @@ def build_curator_candidates(
                 supporting_chunk_ids=chunk_ids,
                 source_sections=sections,
                 evidence_count=len(concept.evidence),
+                is_primary_source_entity=concept.is_primary_source_entity,
             )
         )
     return candidates
@@ -256,6 +279,7 @@ def build_curator_prompt(
     candidates: Iterable[CuratorCandidate],
     *,
     duplicate_risk_groups: Iterable[DuplicateRiskGroup] = (),
+    methodology_subsections: Iterable[str] = (),
 ) -> tuple[str, str]:
     candidate_values = [
         {
@@ -267,6 +291,7 @@ def build_curator_prompt(
             "supporting_chunk_ids": list(candidate.supporting_chunk_ids),
             "source_sections": list(candidate.source_sections),
             "evidence_count": candidate.evidence_count,
+            "is_primary_source_entity": candidate.is_primary_source_entity,
         }
         for candidate in candidates
     ]
@@ -278,6 +303,7 @@ def build_curator_prompt(
         }
         for group in duplicate_risk_groups
     ]
+    method_values = list(methodology_subsections)
     system = (
         "You select existing concept candidates for a source-level knowledge index. "
         "Return only JSON matching the supplied schema. Never create, rename, merge, "
@@ -301,7 +327,7 @@ Lower priority or exclude:
 - incidental baselines
 - generic terms
 - source or system-name variants that differ only by Architecture, Framework, System, Mechanism, Approach, or Method
-- candidates with role dataset, metric, baseline, or analysis unless the candidate metadata says it was retained as a Source contribution
+- candidates with role dataset, metric, baseline, or analysis unless the candidate is clearly the Source contribution
 
 Rules:
 - Select only exact identity strings supplied below.
@@ -310,6 +336,8 @@ Rules:
 - Do not merge candidates based only on token overlap or semantic similarity.
 - Do not merge a broad concept with a named subprocess, a base mechanism with a qualified variant, or two mechanisms that merely share a domain word.
 - Prefer roles core_concept, mechanism, and component. Treat method_entity conservatively and normally exclude dataset, metric, baseline, and analysis.
+- Select at most one candidate marked is_primary_source_entity.
+- Named methodology subsections are weak supervision only. Prefer an existing mechanism/component candidate when its content and supporting sections align with one; never create a missing candidate from a heading.
 - Do not modify candidate content.
 - Give one brief selection reason per selected identity.
 - Return no Markdown and no text outside the JSON object.
@@ -322,6 +350,9 @@ Candidates:
 
 Deterministic duplicate-risk groups (review signals only, never automatic merges):
 {json.dumps(risk_values, ensure_ascii=False, separators=(',', ':'))}
+
+Named methodology subsections (weak supervision only):
+{json.dumps(method_values, ensure_ascii=False, separators=(',', ':'))}
 """
     return system, prompt
 

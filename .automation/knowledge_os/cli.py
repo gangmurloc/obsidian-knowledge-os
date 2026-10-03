@@ -215,6 +215,14 @@ def _print_ai_wiki_plan(plan, vault_root: Path, *, write: bool) -> None:
     print(f"  json_repairs: {plan.stats.json_repairs}")
     print(f"  timeout_failures: {plan.stats.timeout_failures}")
     print(f"  curator_calls: {plan.stats.curator_calls}")
+    print("quality_gate:")
+    print(f"  status: {plan.quality_gate_status}")
+    print("  reasons:")
+    for reason in plan.quality_gate_reasons:
+        print(f"    - {reason}")
+    if not plan.quality_gate_reasons:
+        print("    (none)")
+    print(f"  write_blocked: {str(plan.write_blocked).lower()}")
     print("processed_sources:")
     for source in plan.processed_sources:
         print(f"  - {source}")
@@ -227,6 +235,7 @@ def _print_ai_wiki_plan(plan, vault_root: Path, *, write: bool) -> None:
         ("excluded_tables", plan.excluded_tables),
         ("excluded_figure_text", plan.excluded_figure_text),
         ("formula_warnings", plan.formula_warnings),
+        ("methodology_subsections", plan.methodology_subsections),
         ("candidate_concepts", plan.candidate_concepts),
         ("selected_concepts", plan.selected_concepts),
         ("dropped_concepts", plan.dropped_concepts),
@@ -290,7 +299,9 @@ def _run_ai_wiki_scan(args: argparse.Namespace) -> int:
         write=args.write,
     )
     _print_ai_wiki_plan(plan, args.vault, write=args.write)
-    return 5 if plan.failures else 0
+    if plan.failures:
+        return 5
+    return 6 if plan.quality_gate_status == "failed" else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

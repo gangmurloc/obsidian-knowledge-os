@@ -32,7 +32,17 @@ from .models import (
     StructuredOutputError,
 )
 from .ontology import concept_exclusion_reason, suggest_relations
-from .preprocess import AI_PROCESSING_VIEW_VERSION, build_ai_processing_view
+from .preprocess import (
+    AI_PROCESSING_VIEW_VERSION,
+    build_ai_processing_view,
+    canonicalize_heading_text,
+)
+from .quality import (
+    candidate_matches_methodology_subsection,
+    evaluate_quality_gate,
+    explicit_method_coverage_failure,
+    source_entity_dominance,
+)
 from .render import classify_relation, load_existing_concept, render_concept_note
 from .schema import (
     CONCEPT_EXTRACTION_SCHEMA,
@@ -73,6 +83,55 @@ def _is_source_contribution_role(concept: Concept, source_title: object) -> bool
         return False
     identity = concept_identity(concept.title)
     return identity in set(derive_source_aliases(source_title))
+
+
+def _chunk_methodology_subsections(
+    section_names: tuple[str, ...],
+    methodology_subsections: tuple[str, ...],
+) -> tuple[str, ...]:
+    section_identities = {
+        concept_identity(canonicalize_heading_text(section))
+        for section in section_names
+    }
+    return tuple(
+        heading
+        for heading in methodology_subsections
+        if concept_identity(heading) in section_identities
+    )
+
+
+def _apply_source_context_roles(
+    concepts: dict[str, Concept],
+    *,
+    source_title: object,
+    methodology_subsections: tuple[str, ...],
+    supporting_chunks: dict[str, set[str]],
+    chunk_sections: dict[str, tuple[str, ...]],
+) -> None:
+    source_aliases = set(derive_source_aliases(source_title))
+    for identity, concept in concepts.items():
+        if identity in source_aliases and concept.role not in NORMALLY_EXCLUDED_ROLES:
+            concept.role = "method_entity"
+            concept.is_primary_source_entity = True
+            continue
+        if concept.role != "method_entity":
+            continue
+        if not candidate_matches_methodology_subsection(
+            concept,
+            source_title=source_title,
+            methodology_subsections=methodology_subsections,
+        ):
+            continue
+        supported_sections = {
+            concept_identity(canonicalize_heading_text(section))
+            for chunk_id in supporting_chunks.get(identity, set())
+            for section in chunk_sections.get(chunk_id, ())
+        }
+        if any(
+            concept_identity(heading) in supported_sections
+            for heading in methodology_subsections
+        ):
+            concept.role = "mechanism"
 
 
 @dataclass(frozen=True)
@@ -338,6 +397,10 @@ def process_ai_wiki(
             f"{source.relative_path}: {warning}"
             for warning in processing_view.formula_warnings
         )
+        plan.methodology_subsections.extend(
+            f"{source.relative_path}: {heading}"
+            for heading in processing_view.methodology_subsections
+        )
         for warning in processing_view.warnings:
             plan.warnings.append(f"{source.relative_path}: {warning}")
         chunks = chunk_source(
@@ -374,7 +437,14 @@ def process_ai_wiki(
         }
         source_failed = False
         for chunk in chunks:
-            system, prompt = build_extraction_prompt(chunk)
+            chunk_methodology_subsections = _chunk_methodology_subsections(
+                chunk_sections[chunk.identifier],
+                processing_view.methodology_subsections,
+            )
+            system, prompt = build_extraction_prompt(
+                chunk,
+                methodology_subsections=chunk_methodology_subsections,
+            )
             try:
                 plan.stats.llm_calls += 1
                 response = provider.generate(
@@ -494,9 +564,19 @@ def process_ai_wiki(
         if source_failed:
             continue
 
+        _apply_source_context_roles(
+            local_candidates,
+            source_title=source.metadata.get("title"),
+            methodology_subsections=processing_view.methodology_subsections,
+            supporting_chunks=candidate_chunks,
+            chunk_sections=chunk_sections,
+        )
+
         for identity, concept in sorted(local_candidates.items()):
+            primary = " primary_source_entity=true" if concept.is_primary_source_entity else ""
             plan.candidate_concepts.append(
-                f"{source.relative_path}: {concept.title} [{identity}] role={concept.role}"
+                f"{source.relative_path}: {concept.title} [{identity}] "
+                f"role={concept.role}{primary}"
             )
 
         role_selection_reasons: dict[str, str] = {}
@@ -533,9 +613,20 @@ def process_ai_wiki(
             )
 
         selection_reasons: dict[str, str] = {}
-        needs_curator = (
+        dominance_detected, dominance_count, dominance_total = source_entity_dominance(
+            local_candidates,
+            source_title=source.metadata.get("title"),
+        )
+        coverage_failure = explicit_method_coverage_failure(
+            local_candidates,
+            source_title=source.metadata.get("title"),
+            methodology_subsections=processing_view.methodology_subsections,
+        )
+        needs_curator = bool(local_candidates) and (
             len(local_candidates) > MAX_CONCEPTS_PER_SOURCE
             or bool(duplicate_risk_groups)
+            or dominance_detected
+            or coverage_failure
         )
         if needs_curator:
             trigger_reasons: list[str] = []
@@ -546,6 +637,15 @@ def process_ai_wiki(
             if duplicate_risk_groups:
                 trigger_reasons.append(
                     f"{len(duplicate_risk_groups)} deterministic duplicate-risk group(s)"
+                )
+            if dominance_detected:
+                trigger_reasons.append(
+                    "source-entity dominance "
+                    f"({dominance_count}/{dominance_total} candidates)"
+                )
+            if coverage_failure:
+                trigger_reasons.append(
+                    "explicit-method coverage failure"
                 )
             plan.curator_trigger_reason.append(
                 f"{source.relative_path}: {'; '.join(trigger_reasons)}"
@@ -558,6 +658,7 @@ def process_ai_wiki(
             curator_system, curator_prompt = build_curator_prompt(
                 curator_candidates,
                 duplicate_risk_groups=duplicate_risk_groups,
+                methodology_subsections=processing_view.methodology_subsections,
             )
             try:
                 plan.stats.llm_calls += 1
@@ -643,6 +744,19 @@ def process_ai_wiki(
             plan.selected_concepts.append(
                 f"{source.relative_path}: {local_candidates[identity].title} "
                 f"[{identity}] ({reason})"
+            )
+
+        quality = evaluate_quality_gate(
+            local_candidates,
+            source_title=source.metadata.get("title"),
+            methodology_subsections=processing_view.methodology_subsections,
+            duplicate_risk_groups=duplicate_risk_groups,
+        )
+        if quality.status == "failed":
+            plan.quality_gate_status = "failed"
+        for reason in quality.reasons:
+            plan.quality_gate_reasons.append(
+                f"{source.relative_path}: {reason}"
             )
 
         plan.processed_sources.append(source.relative_path)
@@ -769,7 +883,18 @@ def process_ai_wiki(
                 PlannedChange("update", concept.title, path, relation, content)
             )
 
-    if write:
+    if write and (plan.failures or plan.quality_gate_status == "failed"):
+        plan.write_blocked = True
+        blocker = (
+            "technical failure"
+            if plan.failures
+            else "semantic quality gate failure"
+        )
+        plan.warnings.append(
+            f"AI-Wiki write blocked because of {blocker}; "
+            "no notes or processing state were written"
+        )
+    elif write:
         for change in plan.changed_notes:
             _assert_ai_wiki_path(change.path, output_root)
             if change.action == "update":

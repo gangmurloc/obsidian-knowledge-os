@@ -6,7 +6,7 @@ import unicodedata
 from dataclasses import dataclass
 
 
-AI_PROCESSING_VIEW_VERSION = 5
+AI_PROCESSING_VIEW_VERSION = 6
 PAGE_HEADING_PATTERN = re.compile(r"^###[ \t]+Page[ \t]+(?P<page>\d+)[ \t]*$", re.I)
 SECTION_HEADING_PATTERN = re.compile(
     r"^(?P<marks>#{1,6})[ \t]+(?P<title>.+?)[ \t]*$"
@@ -36,6 +36,19 @@ FORMULA_INTRO_PATTERN = re.compile(
     re.I,
 )
 OMISSION_MARKER_PATTERN = re.compile(r"^> \[.+ omitted from AI extraction:")
+CORE_METHOD_SECTION_NAMES = {"method", "methods", "methodology", "approach", "architecture"}
+NON_METHOD_SUBSECTION_TOKENS = {
+    "ablation",
+    "analysis",
+    "baseline",
+    "dataset",
+    "evaluation",
+    "experiment",
+    "hyperparameter",
+    "implementation",
+    "result",
+    "results",
+}
 
 
 @dataclass(frozen=True)
@@ -48,6 +61,7 @@ class AIProcessingView:
     excluded_figure_text: tuple[str, ...] = ()
     formula_warnings: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    methodology_subsections: tuple[str, ...] = ()
 
 
 def _heading_title(line: str) -> str | None:
@@ -76,6 +90,84 @@ def canonicalize_heading_text(value: str) -> str:
     text = re.sub(r"[^\w\s-]", " ", text, flags=re.UNICODE)
     text = re.sub(r"[-\s]+", " ", text).strip().casefold()
     return text
+
+
+def _heading_number(value: str) -> tuple[int, ...] | None:
+    text = unicodedata.normalize("NFKC", html.unescape(value))
+    text = re.sub(r"<[^>]{1,200}>", " ", text)
+    text = re.sub(r"[*_~`]+", "", text).strip()
+    match = re.match(r"^(?:section\s+)?(\d+(?:\.\d+)*)\b", text, re.I)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _edit_distance(left: str, right: str) -> int:
+    previous = list(range(len(right) + 1))
+    for left_index, left_character in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_character in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[right_index] + 1,
+                    previous[right_index - 1]
+                    + (left_character != right_character),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _is_core_method_heading(canonical_title: str) -> bool:
+    if canonical_title in CORE_METHOD_SECTION_NAMES:
+        return True
+    return any(
+        len(canonical_title) >= 6 and _edit_distance(canonical_title, expected) <= 2
+        for expected in CORE_METHOD_SECTION_NAMES
+        if len(expected) >= 6
+    )
+
+
+def _is_named_method_subsection(canonical_title: str) -> bool:
+    tokens = set(canonical_title.split())
+    return bool(canonical_title) and not bool(tokens & NON_METHOD_SUBSECTION_TOKENS)
+
+
+def detect_methodology_subsections(content: str) -> tuple[str, ...]:
+    signals: list[str] = []
+    root_level: int | None = None
+    root_number: tuple[int, ...] | None = None
+
+    for line in content.splitlines():
+        heading = _heading_info(line)
+        if heading is None:
+            continue
+        level, raw_title = heading
+        canonical_title = canonicalize_heading_text(raw_title)
+        number = _heading_number(raw_title)
+
+        if root_level is not None:
+            numbered_child = bool(
+                root_number
+                and number
+                and len(number) > len(root_number)
+                and number[: len(root_number)] == root_number
+            )
+            markdown_child = level > root_level
+            if numbered_child or markdown_child:
+                if _is_named_method_subsection(canonical_title):
+                    signals.append(canonical_title)
+                continue
+            if level <= root_level:
+                root_level = None
+                root_number = None
+
+        if _is_core_method_heading(canonical_title):
+            root_level = level
+            root_number = number
+
+    return tuple(dict.fromkeys(signals))
 
 
 def _is_table_separator(line: str) -> bool:
@@ -403,4 +495,5 @@ def build_ai_processing_view(content: str) -> AIProcessingView:
         excluded_figure_text=tuple(dict.fromkeys(excluded_figures)),
         formula_warnings=tuple(dict.fromkeys(formula_warnings)),
         warnings=tuple(dict.fromkeys(warnings)),
+        methodology_subsections=detect_methodology_subsections(normalized),
     )

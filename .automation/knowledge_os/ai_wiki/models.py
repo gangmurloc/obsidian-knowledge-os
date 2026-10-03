@@ -68,6 +68,7 @@ class Concept:
     domain: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
     role: str = "core_concept"
+    is_primary_source_entity: bool = False
 
 
 @dataclass
@@ -137,6 +138,10 @@ class ProcessingPlan:
     curator_trigger_reason: list[str] = field(default_factory=list)
     selected_representatives: list[str] = field(default_factory=list)
     dropped_aliases: list[str] = field(default_factory=list)
+    methodology_subsections: list[str] = field(default_factory=list)
+    quality_gate_status: str = "pass"
+    quality_gate_reasons: list[str] = field(default_factory=list)
+    write_blocked: bool = False
     state_updates: dict[str, dict[str, Any]] = field(default_factory=dict)
     stats: ProcessingStats = field(default_factory=ProcessingStats)
 

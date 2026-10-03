@@ -1126,6 +1126,245 @@ class AIWikiTests(unittest.TestCase):
         self.assertEqual([change.title for change in plan.changed_notes], ["EvalSet"])
         self.assertIn("retained because its identity", plan.selected_concepts[0])
 
+    def test_71_exact_source_alias_becomes_primary_method_entity(self):
+        self._source(title="NEXUS: Neural Exchange for Unified Search")
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(concept_value("NEXUS", role="component"))
+            )
+        )
+
+        self.assertIn("role=method_entity", plan.candidate_concepts[0])
+        self.assertIn("primary_source_entity=true", plan.candidate_concepts[0])
+
+    def test_72_source_alias_with_meaningful_mechanism_keeps_mechanism_role(self):
+        self._source(title="NEXUS: Neural Exchange for Unified Search")
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(
+                    concept_value("NEXUS Routing Mechanism", role="mechanism")
+                )
+            )
+        )
+
+        self.assertIn("role=mechanism", plan.candidate_concepts[0])
+        self.assertNotIn("primary_source_entity=true", plan.candidate_concepts[0])
+        self.assertEqual(plan.quality_gate_status, "pass")
+
+    def test_73_multiple_nonprimary_method_entities_are_not_forced_to_one(self):
+        body = ("A" * 3_400) + "\n\n" + ("B" * 3_400)
+        self._source(body=body, title="Independent Systems Review")
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value("Named Planner Method", role="method_entity")),
+                response(concept_value("Named Retriever Method", role="method_entity")),
+            )
+        )
+        plan = self._run(provider)
+
+        self.assertEqual(plan.stats.curator_calls, 0)
+        self.assertEqual(len(plan.selected_concepts), 2)
+        self.assertEqual(plan.quality_gate_status, "pass")
+
+    def test_74_source_entity_dominance_triggers_curator(self):
+        body = "\n\n".join(character * 3_400 for character in "ABC")
+        self._source(
+            body=body,
+            title="NEXUS: Neural Exchange for Unified Search",
+        )
+        titles = ("NEXUS Planner", "NEXUS Retriever", "NEXUS Controller")
+        provider = FakeLLMProvider(
+            response_texts=tuple(
+                response(concept_value(title, role="method_entity"))
+                for title in titles
+            )
+            + (curator_response(concept_identity(titles[0])),)
+        )
+        plan = self._run(provider)
+
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertIn("source-entity dominance", plan.curator_trigger_reason[0])
+        self.assertEqual(plan.quality_gate_status, "failed")
+
+    def test_75_explicit_method_coverage_failure_triggers_curator(self):
+        body = (
+            "#### 3 Methodology\n\n"
+            "##### 3.1 State Construction\n\n" + ("A" * 3_400) + "\n\n"
+            "##### 3.2 Dynamic Routing\n\n" + ("B" * 3_400)
+        )
+        self._source(body=body, title="Structured Reasoning Study")
+        first = concept_identity("General Design One")
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value("General Design One")),
+                response(concept_value("General Design Two")),
+                curator_response(first),
+            )
+        )
+        plan = self._run(provider)
+
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertIn("explicit-method coverage failure", plan.curator_trigger_reason[0])
+        self.assertEqual(plan.quality_gate_status, "failed")
+        self.assertTrue(
+            any(
+                "explicit methodology mechanisms detected but none selected" in reason
+                for reason in plan.quality_gate_reasons
+            )
+        )
+
+    def test_76_survey_without_method_structure_passes_quality_gate(self):
+        self._source(
+            body="## Survey Taxonomy\n\nThis survey organizes prior work.",
+            title="A Survey of Retrieval Systems",
+        )
+        plan = self._run(
+            FakeLLMProvider(response_text=response(concept_value("Retrieval Taxonomy")))
+        )
+
+        self.assertEqual(plan.stats.curator_calls, 0)
+        self.assertEqual(plan.quality_gate_status, "pass")
+        self.assertEqual(plan.quality_gate_reasons, [])
+
+    def test_77_curator_mechanism_recovery_passes_quality_gate(self):
+        body = (
+            "#### 3 Methodology\n\n"
+            "##### 3.1 State Construction\n\n" + ("A" * 3_400) + "\n\n"
+            "##### 3.2 Dynamic Linking\n\n" + ("B" * 3_400) + "\n\n"
+            "##### 3.3 Selective Routing\n\n" + ("C" * 3_400)
+        )
+        self._source(
+            body=body,
+            title="NEXUS: Neural Exchange for Unified Search",
+        )
+        selected = concept_identity("Selective Routing")
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value("NEXUS Planner", role="method_entity")),
+                response(concept_value("NEXUS Retriever", role="method_entity")),
+                response(concept_value("Selective Routing", role="mechanism")),
+                curator_response(selected),
+            )
+        )
+        plan = self._run(provider)
+
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertIn("source-entity dominance", plan.curator_trigger_reason[0])
+        self.assertEqual(plan.quality_gate_status, "pass")
+        self.assertEqual(
+            [change.title for change in plan.changed_notes],
+            ["Selective Routing"],
+        )
+
+    def test_78_quality_gate_failure_blocks_write_and_preserves_owned_notes(self):
+        source = self._source(title="NEXUS: Neural Exchange for Unified Search")
+        source_before = source.read_bytes()
+        knowledge = self.knowledge / "Human Note.md"
+        knowledge.write_text("Human-owned content.\n", encoding="utf-8")
+        knowledge_before = knowledge.read_bytes()
+
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(concept_value("NEXUS", role="component"))
+            ),
+            write=True,
+        )
+
+        self.assertEqual(plan.quality_gate_status, "failed")
+        self.assertTrue(plan.write_blocked)
+        self.assertEqual(source.read_bytes(), source_before)
+        self.assertEqual(knowledge.read_bytes(), knowledge_before)
+        self.assertEqual(list(self.ai_wiki.glob("*.md")), [])
+        self.assertFalse((self.vault / ".automation" / "state" / "ai_wiki.json").exists())
+
+    def test_79_method_heading_can_correct_matching_branded_candidate_role(self):
+        body = (
+            "#### 3 Methodology\n\n"
+            "##### 3.1 State Construction\n\n"
+            "The state construction mechanism creates normalized records."
+        )
+        self._source(
+            body=body,
+            title="NEXUS: Neural Exchange for Unified Search",
+        )
+        plan = self._run(
+            FakeLLMProvider(
+                response_text=response(
+                    concept_value(
+                        "NEXUS State Construction Mechanism",
+                        role="method_entity",
+                    )
+                )
+            )
+        )
+
+        self.assertIn("role=mechanism", plan.candidate_concepts[0])
+        self.assertNotIn("primary_source_entity=true", plan.candidate_concepts[0])
+
+    def test_80_unresolved_duplicate_risk_fails_quality_gate(self):
+        body = ("A" * 3_400) + "\n\n" + ("B" * 3_400)
+        self._source(body=body, title="Composable Retrieval Study")
+        titles = ("Query Routing", "Query Routing Mechanism")
+        identities = tuple(concept_identity(title) for title in titles)
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value(titles[0], role="mechanism")),
+                response(concept_value(titles[1], role="mechanism")),
+                curator_response(*identities),
+            )
+        )
+        plan = self._run(provider)
+
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertEqual(plan.quality_gate_status, "failed")
+        self.assertTrue(
+            any("unresolved duplicate-risk" in reason for reason in plan.quality_gate_reasons)
+        )
+
+    def test_81_multiple_primary_source_entities_fail_quality_gate(self):
+        body = ("A" * 3_400) + "\n\n" + ("B" * 3_400)
+        self._source(
+            body=body,
+            title="NEXUS: Neural Exchange for Unified Search",
+        )
+        titles = ("NEXUS", "Neural Exchange")
+        identities = tuple(concept_identity(title) for title in titles)
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value(titles[0], role="component")),
+                response(concept_value(titles[1], role="core_concept")),
+                curator_response(*identities),
+            )
+        )
+        plan = self._run(provider)
+
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertEqual(plan.quality_gate_status, "failed")
+        self.assertTrue(
+            any("multiple primary source entities" in reason for reason in plan.quality_gate_reasons)
+        )
+
+    def test_82_technical_failure_blocks_partial_multi_source_write(self):
+        first = self._source("a-good.md", body="A valid source body.")
+        second = self._source("b-bad.md", body="A source with malformed output.")
+        before = {path: path.read_bytes() for path in (first, second)}
+        provider = FakeLLMProvider(
+            response_texts=(
+                response(concept_value("Valid Concept")),
+                "{malformed",
+                "{still-malformed",
+            )
+        )
+
+        plan = self._run(provider, write=True)
+
+        self.assertTrue(plan.failures)
+        self.assertTrue(plan.write_blocked)
+        self.assertEqual(list(self.ai_wiki.glob("*.md")), [])
+        self.assertFalse((self.vault / ".automation" / "state" / "ai_wiki.json").exists())
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+
 
 if __name__ == "__main__":
     unittest.main()
