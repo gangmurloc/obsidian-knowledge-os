@@ -10,6 +10,7 @@ from .base import (
     ModelNotInstalledError,
     ProviderRequestError,
     ProviderTimeoutError,
+    request_unload,
 )
 from .config import LLMConfig, LLMConfigError, load_llm_config
 from .factory import create_provider
@@ -34,4 +35,5 @@ __all__ = [
     "ProviderTimeoutError",
     "create_provider",
     "load_llm_config",
+    "request_unload",
 ]

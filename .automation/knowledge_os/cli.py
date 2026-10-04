@@ -8,10 +8,12 @@ from typing import Sequence
 from .ai_wiki import AIWikiError, ScanScope, process_ai_wiki
 from .llm import (
     GenerateRequest,
+    LLMConfig,
     LLMError,
     ProviderRequestError,
     create_provider,
     load_llm_config,
+    request_unload,
 )
 from .llm.config import resolve_config_path
 from .paper_ingest import IngestError, OCRRequiredError, ingest_paper
@@ -138,6 +140,14 @@ def _load_local_provider(vault: Path, configured_path: Path | None):
     return config, create_provider(config), config_path
 
 
+def _gpu_release_lines(config: LLMConfig) -> list[str]:
+    keep_alive = "(not set)" if config.keep_alive is None else str(config.keep_alive)
+    return [
+        f"keep_alive: {keep_alive}",
+        f"unload_after_run: {str(config.unload_after_run).lower()}",
+    ]
+
+
 def _run_llm_status(vault: Path, configured_path: Path | None) -> int:
     config, provider, config_path = _load_local_provider(vault, configured_path)
     health = provider.health_check()
@@ -155,6 +165,8 @@ def _run_llm_status(vault: Path, configured_path: Path | None) -> int:
     print(f"server_reachable: {str(health.reachable).lower()}")
     print(f"server_version: {health.version or '(unavailable)'}")
     print(f"configured_model: {config.model or '(not set)'}")
+    for line in _gpu_release_lines(config):
+        print(line)
     if models:
         print("installed_models:")
         for model in models:
@@ -175,15 +187,35 @@ def _run_llm_test(
     model: str | None,
     prompt: str,
 ) -> int:
-    _config, provider, _config_path = _load_local_provider(vault, configured_path)
+    config, provider, _config_path = _load_local_provider(vault, configured_path)
     health = provider.health_check()
     if not health.reachable:
         raise ProviderRequestError(
             health.error or f"Local {provider.name} server is not reachable."
         )
-    response = provider.generate(GenerateRequest(prompt=prompt, model=model))
+    unload_requests = 0
+    unload_warning = None
+    completed = False
+    try:
+        response = provider.generate(GenerateRequest(prompt=prompt, model=model))
+        completed = True
+    finally:
+        # The try block starts at the only LLM call, so reaching here means one was made.
+        unload_model = (model or config.model or "").strip()
+        if config.unload_after_run and unload_model:
+            unload_requests += 1
+            unload_warning = request_unload(provider, unload_model)
+            if unload_warning and not completed:
+                logging.warning("%s", unload_warning)
     print(f"provider: {response.provider}")
+    print(f"endpoint: {provider.endpoint}")
     print(f"model: {response.model}")
+    for line in _gpu_release_lines(config):
+        print(line)
+    print("llm_calls: 1")
+    print(f"unload_requests: {unload_requests}")
+    if unload_warning:
+        print(f"warning: {unload_warning}")
     print(f"done: {str(response.done).lower()}")
     print("response:")
     print(response.text)
@@ -202,8 +234,21 @@ def _scan_scope(args: argparse.Namespace) -> ScanScope:
     return ScanScope("changed")
 
 
-def _print_ai_wiki_plan(plan, vault_root: Path, *, write: bool) -> None:
+def _print_ai_wiki_plan(
+    plan,
+    vault_root: Path,
+    *,
+    write: bool,
+    config: LLMConfig | None = None,
+    endpoint: str | None = None,
+) -> None:
     print(f"mode: {'write' if write else 'dry-run'}")
+    if config is not None:
+        print("llm:")
+        print(f"  endpoint: {endpoint or config.base_url}")
+        print(f"  model: {config.model or '(not set)'}")
+        for line in _gpu_release_lines(config):
+            print(f"  {line}")
     print("statistics:")
     print(f"  source_characters: {plan.stats.source_characters}")
     print(f"  processing_characters: {plan.stats.processing_characters}")
@@ -215,6 +260,7 @@ def _print_ai_wiki_plan(plan, vault_root: Path, *, write: bool) -> None:
     print(f"  json_repairs: {plan.stats.json_repairs}")
     print(f"  timeout_failures: {plan.stats.timeout_failures}")
     print(f"  curator_calls: {plan.stats.curator_calls}")
+    print(f"  unload_requests: {plan.stats.unload_requests}")
     print("quality_gate:")
     print(f"  status: {plan.quality_gate_status}")
     print("  reasons:")
@@ -297,8 +343,15 @@ def _run_ai_wiki_scan(args: argparse.Namespace) -> int:
         model_name=config.model,
         scope=_scan_scope(args),
         write=args.write,
+        unload_after_run=config.unload_after_run,
     )
-    _print_ai_wiki_plan(plan, args.vault, write=args.write)
+    _print_ai_wiki_plan(
+        plan,
+        args.vault,
+        write=args.write,
+        config=config,
+        endpoint=provider.endpoint,
+    )
     if plan.failures:
         return 5
     return 6 if plan.quality_gate_status == "failed" else 0

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -13,7 +14,18 @@ from .base import LLMError
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_CONFIG_RELATIVE_PATH = Path(".automation/config/local_llm.json")
-ALLOWED_CONFIG_KEYS = {"provider", "base_url", "model", "temperature", "timeout"}
+ALLOWED_CONFIG_KEYS = {
+    "provider",
+    "base_url",
+    "model",
+    "temperature",
+    "timeout",
+    "keep_alive",
+    "unload_after_run",
+}
+MAX_KEEP_ALIVE_SECONDS = 3600
+# At most four significant digits, so an oversized duration never reaches int().
+KEEP_ALIVE_DURATION_PATTERN = re.compile(r"0*([0-9]{1,4})(s|m)")
 
 
 class LLMConfigError(LLMError):
@@ -27,6 +39,8 @@ class LLMConfig:
     model: str | None = None
     temperature: float = 0.2
     timeout: float = 60.0
+    keep_alive: int | str | None = None
+    unload_after_run: bool = False
 
 
 def validate_loopback_base_url(value: str) -> str:
@@ -67,6 +81,25 @@ def _number(value: Any, *, field: str) -> float:
     return float(value)
 
 
+def _keep_alive(value: Any) -> int | str | None:
+    """Accept only a bounded duration so a shared GPU is never held indefinitely."""
+    if value is None:
+        return None
+    seconds: int | None = None
+    if isinstance(value, int) and not isinstance(value, bool):
+        seconds = value
+    elif isinstance(value, str):
+        match = KEEP_ALIVE_DURATION_PATTERN.fullmatch(value)
+        if match:
+            seconds = int(match.group(1)) * (60 if match.group(2) == "m" else 1)
+    if seconds is None or not 0 <= seconds <= MAX_KEEP_ALIVE_SECONDS:
+        raise LLMConfigError(
+            "keep_alive must be an integer from 0 to 3600 seconds or a duration "
+            "such as '30s' or '2m' (at most '60m')."
+        )
+    return value
+
+
 def parse_llm_config(value: Mapping[str, Any]) -> LLMConfig:
     unknown = set(value) - ALLOWED_CONFIG_KEYS
     if unknown:
@@ -95,12 +128,20 @@ def parse_llm_config(value: Mapping[str, Any]) -> LLMConfig:
     if not 0 < timeout <= 600:
         raise LLMConfigError("timeout must be greater than 0 and at most 600 seconds.")
 
+    keep_alive = _keep_alive(value.get("keep_alive"))
+
+    unload_after_run = value.get("unload_after_run", False)
+    if not isinstance(unload_after_run, bool):
+        raise LLMConfigError("unload_after_run must be true or false.")
+
     return LLMConfig(
         provider="ollama",
         base_url=base_url,
         model=model,
         temperature=temperature,
         timeout=timeout,
+        keep_alive=keep_alive,
+        unload_after_run=unload_after_run,
     )
 
 

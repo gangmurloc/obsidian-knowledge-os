@@ -1,6 +1,6 @@
 # Knowledge OS Local Automation
 
-This package provides local-first automation for the Vault. It currently includes PDF-to-Markdown ingestion and a localhost-only Local LLM provider layer. It does not call an external AI API.
+This package provides local-first automation for the Vault. It currently includes PDF-to-Markdown ingestion and a loopback-only Local LLM provider layer. LLM inference runs on the user's own lab GPU server and is reached only through an SSH tunnel on `localhost`. It does not call an external AI API.
 
 ## Environment Audit
 
@@ -11,6 +11,7 @@ This package provides local-first automation for the Vault. It currently include
 - Current layout-aware default: `pymupdf4llm 1.28.2`
 - Initial audit on 2026-09-23: Ollama was not installed or reachable.
 - User-confirmed state on 2026-09-26: localhost Ollama, configured model, `llm-status`, and `llm-test` are working.
+- State on 2026-10-04 (Stage S): LLM inference moved to Ollama `qwen3.5:27b` on the user's lab GPU server (RTX A5000 24 GB x 2, Ubuntu), reached through an SSH local port forward at `localhost:11435`. The pipeline no longer uses the desktop Ollama on port 11434.
 
 `PyMuPDF4LLM 1.28.2` is the default local extractor because it preserves page chunks, headings, multi-column reading order, and Markdown tables more reliably than plain `pypdf`. `pypdf 6.19.0` remains available as the explicit legacy extractor. `PyYAML 6.0.3` parses Obsidian frontmatter with `safe_load` so malformed YAML and property types can be rejected before Source content reaches the LLM. No extractor sends PDF content to a cloud service.
 
@@ -122,6 +123,9 @@ The provider interface is under `.automation/knowledge_os/llm/` and exposes:
 - `health_check()`
 - `list_models()`
 - `generate()`
+- `unload()`
+
+`unload()` asks the provider to release a model from memory. It is not a generation call and is counted as `unload_requests`, never as `llm_calls`.
 
 `OllamaProvider` is the only runtime provider in v1. `FakeLLMProvider` is deterministic and test-only, so unit tests never require Ollama or network access. Requests and responses use typed dataclasses in `llm/base.py`.
 
@@ -134,14 +138,45 @@ Configuration is stored at `.automation/config/local_llm.json`:
 ```json
 {
   "provider": "ollama",
-  "base_url": "http://localhost:11434",
-  "model": null,
-  "temperature": 0.2,
-  "timeout": 60.0
+  "base_url": "http://localhost:11435",
+  "model": "qwen3.5:27b",
+  "temperature": 0.0,
+  "timeout": 300.0,
+  "keep_alive": "2m",
+  "unload_after_run": true
 }
 ```
 
-Set `model` to the exact name shown by `ollama list`, including its tag. A missing model is an intentional blocking state: the CLI reports installed models and does not select or download one automatically.
+Set `model` to the exact name shown by `ollama list` on the server, including its tag. A missing model is an intentional blocking state: the CLI reports installed models and does not select or download one automatically. Unknown keys are rejected.
+
+- `timeout` is at most 600 seconds. The 300-second value allows for loading the 27B model on the first request.
+- `keep_alive` is optional. When set, it is sent with every generation request and tells Ollama how long to keep the model loaded after that request. It must be an integer from 0 to 3600 seconds or a duration such as `"30s"` or `"2m"` (at most `"60m"`). Negative values, `-1`, and other strings are rejected so a shared GPU is never held indefinitely. When omitted, the request payload is unchanged.
+- `unload_after_run` is optional and defaults to `false`. When `true`, `ai-wiki scan` and `llm-test` send one unload request at the end of a run that made at least one LLM call.
+
+A config file without the two new keys loads with the same meaning as before.
+
+### Lab Server Runtime
+
+The model runs in Ollama on the user's own lab GPU server. Ollama stays bound to `127.0.0.1` on the server and must not be exposed to the network. The desktop reaches it through an SSH local port forward that the user opens and leaves running in a separate PowerShell window:
+
+```powershell
+ssh -N -L 11435:127.0.0.1:11434 <Host-alias>
+```
+
+Port 11435 is used so the pipeline cannot reach a desktop Ollama on 11434 by accident. The pipeline never opens the tunnel and never runs `ssh`.
+
+Only LLM requests cross the tunnel: Source chunks for extraction, the model's own malformed response for JSON repair, candidate summaries for curation, and the `llm-test` prompt. PDF ingestion, preprocessing, chunking, deduplication, role assignment, the quality gate, and file writes run on the desktop.
+
+The lab GPU is shared, so a run releases it when it ends:
+
+- Every generation request carries the configured `keep_alive`.
+- After the last step of a run, including any AI-Wiki write and state update, one unload request (`{"model": ..., "keep_alive": 0}` with no prompt) is sent if the run made at least one LLM call. This happens on the pass (`0`), quality-failure (`6`), and technical-failure (`5`) paths, for dry-run and `--write` alike.
+- A run with no LLM call, such as one where every Source is unchanged, sends no unload request.
+- A failed unload adds one warning line and never changes the exit code. It is not retried; the model then stays loaded until `keep_alive` expires.
+
+If another job on the server uses the same model at the same time, the unload makes that job reload the model on its next request. In that case set `unload_after_run` to `false` and rely on `keep_alive` alone.
+
+The limits designed for a 4B model are retained with the 27B model: 1,024 output tokens, `think: false`, `temperature: 0`, one JSON repair, one concept per chunk, and 12 concepts per Source.
 
 Configuration contains no API key or credential. Future programmatic config writes use a same-directory temporary file, flush and sync it, then atomically replace the destination so Google Drive cannot observe a partially written file.
 
@@ -153,10 +188,13 @@ Configuration contains no API key or credential. Future programmatic config writ
 - Ollama model identifiers containing a `cloud` token are blocked.
 - Generation first verifies that the exact model appears in the local `/api/tags` result.
 - The local Ollama API requires no API key; this project does not support Ollama cloud endpoints or cloud fallback.
+- A remote host or IP address is never accepted as `base_url`, including the lab server's own address. The server is reachable only through the loopback end of the SSH tunnel.
+- A connection failure, such as a closed tunnel, is a technical failure that blocks writes and state updates (exit code `5` for `ai-wiki scan`). There is no automatic retry and no fallback to another endpoint or port.
+- The unload request uses the same transport, so the loopback, proxy, and redirect rules apply to it as well.
 
 ### Install Ollama Manually on Windows
 
-Ollama is not currently installed. Do not install it from this automation. To enable the provider:
+Since Stage S the pipeline does not use a desktop Ollama; this section is kept as a reference for a desktop-only setup. Do not install Ollama from this automation. To enable the provider:
 
 1. Download and run the Windows installer from [Ollama's official Windows download page](https://ollama.com/download/windows).
 2. Open a new PowerShell window and confirm the executable:
@@ -196,7 +234,7 @@ $knowledgeOsPython = "$env:LOCALAPPDATA\GangilKnowledgeOS\.venv\Scripts\python.e
 & $knowledgeOsPython ".automation\run.py" llm-status
 ```
 
-Output includes config path, provider, endpoint, reachability, server version, configured model, and installed models.
+Output includes config path, provider, endpoint, reachability, server version, configured model, `keep_alive`, `unload_after_run`, and installed models. It sends no unload request.
 
 ### Explicit Generation Test
 
@@ -212,7 +250,7 @@ Use an installed model once without changing config:
 & $knowledgeOsPython ".automation\run.py" llm-test --model "<installed-model-name>"
 ```
 
-The response is printed to the terminal only. This command does not create AI-Wiki notes or write under `30_Resources/`.
+The response is printed to the terminal only, together with the endpoint, model, `keep_alive`, `unload_after_run`, `llm_calls`, and `unload_requests`. When `unload_after_run` is `true`, one unload request follows the generation, whether it succeeded or failed. This command does not create AI-Wiki notes or write under `30_Resources/`.
 
 ## AI-Wiki Knowledge Processing
 
@@ -249,7 +287,7 @@ An initial JSON syntax failure writes one diagnostic JSON artifact under `.autom
 
 The processing view is split at section and paragraph boundaries before sentence or fixed-length fallback splitting. The default maximum is 4,000 characters with up to 200 characters of whole-paragraph overlap. Chunk size and overlap are defined once in `ai_wiki/source.py`. State stores the processing-view version, Source SHA-256 hashes, chunk identifiers, and normalized concept identities under `.automation/state/ai_wiki.json`; Source Markdown remains authoritative.
 
-Each chunk returns at most one central concept candidate. This keeps the structured record within the 1,024-token output budget on small local models. Each candidate also has one selection-only `role`: `core_concept`, `mechanism`, `component`, `method_entity`, `dataset`, `metric`, `baseline`, or `analysis`. The role is not persisted to AI-Wiki Markdown. Per concept, v1 permits at most 5 key points, 5 related concepts, 3 evidence items, 3 open questions, and 3 domains. Deterministic identity deduplication followed by source-level selection keeps at most 12 final concepts. The configured 180-second timeout is retained; timeout does not trigger an automatic retry. An Ollama `done_reason` of `length` is reported as truncation and does not trigger syntax repair because missing content cannot be repaired safely.
+Each chunk returns at most one central concept candidate. This keeps the structured record within the 1,024-token output budget on small local models. Each candidate also has one selection-only `role`: `core_concept`, `mechanism`, `component`, `method_entity`, `dataset`, `metric`, `baseline`, or `analysis`. The role is not persisted to AI-Wiki Markdown. Per concept, v1 permits at most 5 key points, 5 related concepts, 3 evidence items, 3 open questions, and 3 domains. Deterministic identity deduplication followed by source-level selection keeps at most 12 final concepts. The configured timeout applies to each request (300 seconds for the lab server); timeout does not trigger an automatic retry. An Ollama `done_reason` of `length` is reported as truncation and does not trigger syntax repair because missing content cannot be repaired safely.
 
 ### Source-Level Concept Selection
 
@@ -287,7 +325,7 @@ python ".automation\run.py" ai-wiki scan --all
 python ".automation\run.py" ai-wiki scan --changed
 ```
 
-The plan reports processed and skipped Sources, new concepts, updates with `supports`, `extends`, or `contradicts` relation, unchanged concepts, non-writing ontology relation suggestions, removed Sources, warnings, and failures. Processing diagnostics list included and excluded sections, named methodology subsections, included block count, excluded tables, excluded figure text, formula warnings, Source and processing character counts, and chunk count. Concept-selection diagnostics list all candidates, selected and dropped concepts, duplicate-risk groups, curator trigger reasons, selected representatives, dropped aliases, curator call count, and quality-gate status. An unchanged Source still receives local preprocessing diagnostics but does not call the LLM. Removed Sources are report-only and never cause AI-Wiki deletion.
+The plan reports processed and skipped Sources, new concepts, updates with `supports`, `extends`, or `contradicts` relation, unchanged concepts, non-writing ontology relation suggestions, removed Sources, warnings, and failures. Processing diagnostics list included and excluded sections, named methodology subsections, included block count, excluded tables, excluded figure text, formula warnings, Source and processing character counts, and chunk count. Concept-selection diagnostics list all candidates, selected and dropped concepts, duplicate-risk groups, curator trigger reasons, selected representatives, dropped aliases, curator call count, and quality-gate status. The report starts with an `llm` block showing `endpoint`, `model`, `keep_alive`, and `unload_after_run`, and `statistics` lists `unload_requests` separately from `llm_calls`. An unchanged Source still receives local preprocessing diagnostics but does not call the LLM. Removed Sources are report-only and never cause AI-Wiki deletion.
 
 ### Explicit Write
 

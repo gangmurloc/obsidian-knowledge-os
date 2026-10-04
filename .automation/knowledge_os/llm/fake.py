@@ -31,6 +31,7 @@ class FakeLLMProvider(LLMProvider):
         self._reachable = reachable
         self._done_reason = done_reason
         self.requests: list[GenerateRequest] = []
+        self.unload_requests: list[str] = []
 
     @property
     def name(self) -> str:
@@ -80,3 +81,6 @@ class FakeLLMProvider(LLMProvider):
             done=True,
             done_reason=self._done_reason,
         )
+
+    def unload(self, model: str) -> None:
+        self.unload_requests.append(model)

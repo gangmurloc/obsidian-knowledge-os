@@ -109,6 +109,7 @@ class ProcessingStats:
     json_repairs: int = 0
     timeout_failures: int = 0
     curator_calls: int = 0
+    unload_requests: int = 0
 
     @property
     def average_chunk_size(self) -> float:

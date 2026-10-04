@@ -93,3 +93,25 @@ class LLMProvider(ABC):
     @abstractmethod
     def generate(self, request: GenerateRequest) -> GenerateResponse:
         raise NotImplementedError
+
+    @abstractmethod
+    def unload(self, model: str) -> None:
+        """Ask the provider to release the model from memory; not a generation call."""
+        raise NotImplementedError
+
+
+def request_unload(provider: LLMProvider, model: str) -> str | None:
+    """Send the single end-of-run unload request.
+
+    Returns one warning line instead of raising, and never retries, so a failed
+    unload cannot change a run's outcome.
+    """
+    try:
+        provider.unload(model)
+    except Exception as exc:
+        detail = " ".join(str(exc).split())
+        return (
+            f"Local LLM unload request for {model!r} failed; the model may stay "
+            f"loaded until keep_alive expires: {type(exc).__name__}: {detail}"
+        )
+    return None

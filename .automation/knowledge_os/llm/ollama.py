@@ -25,6 +25,7 @@ from .config import LLMConfig
 
 JsonTransport = Callable[[str, str, Mapping[str, Any] | None, float], Mapping[str, Any]]
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_UNLOAD_TIMEOUT_SECONDS = 10
 CLOUD_MODEL_PATTERN = re.compile(r"(?:^|[:/_-])cloud(?:$|[:/_-])", re.IGNORECASE)
 
 
@@ -225,6 +226,8 @@ class OllamaProvider(LLMProvider):
             payload["format"] = request.response_format
         if request.think is not None:
             payload["think"] = request.think
+        if self._config.keep_alive is not None:
+            payload["keep_alive"] = self._config.keep_alive
 
         response = self._request("POST", "/api/generate", payload, timeout=timeout)
         text = response.get("response")
@@ -249,4 +252,17 @@ class OllamaProvider(LLMProvider):
             total_duration_ns=_optional_int(response.get("total_duration"), field="total_duration"),
             prompt_eval_count=_optional_int(response.get("prompt_eval_count"), field="prompt_eval_count"),
             eval_count=_optional_int(response.get("eval_count"), field="eval_count"),
+        )
+
+    def unload(self, model: str) -> None:
+        name = model.strip() if isinstance(model, str) else ""
+        if not name:
+            raise ModelNotConfiguredError("No model was given to unload.")
+        _reject_cloud_model(name)
+        # A generate request without a prompt and with keep_alive 0 only evicts the model.
+        self._request(
+            "POST",
+            "/api/generate",
+            {"model": name, "keep_alive": 0},
+            timeout=min(self._config.timeout, MAX_UNLOAD_TIMEOUT_SECONDS),
         )

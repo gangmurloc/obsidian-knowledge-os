@@ -291,6 +291,7 @@ class AIWikiPreprocessTests(unittest.TestCase):
             "status: failed",
             "test quality reason",
             "curator_calls: 0",
+            "unload_requests: 0",
             "candidate_concepts:",
             "selected_concepts:",
             "dropped_concepts:",

@@ -28,6 +28,8 @@ human_verified: false
 
 PDF에서 AI-Wiki까지 이어지는 local-first 파이프라인은 기술적으로 동작한다. 현재 병목은 여러 method subsection이 하나의 일반 chunk에 섞일 때 `1 concept per chunk` 제약 때문에 명시적 mechanism이 후보로 생성되지 않는 문제다. Curator와 semantic quality gate는 이 문제를 정상적으로 감지하지만, curator는 기존 후보만 선택할 수 있으므로 누락된 mechanism을 복구할 수 없다.
 
+Stage S 이후 `qwen3.5:27b` 기준선에서는 quality gate가 pass한다. 그래도 A-MEM의 method subsection 4개 중 2개는 후보에 없으므로 이 병목은 남아 있다.
+
 ## 절대 규칙
 
 1. `30_Resources/Sources/`는 외부 원본이다. 자동 수정하지 않는다.
@@ -35,7 +37,7 @@ PDF에서 AI-Wiki까지 이어지는 local-first 파이프라인은 기술적으
 3. AI가 쓸 수 있는 지식 영역은 `30_Resources/AI-Wiki/`뿐이다.
 4. PDF 원본은 `_assets/PDF/`에 보존한다.
 5. dry-run이 기본이며 삭제, bulk rename, bulk move를 자동 수행하지 않는다.
-6. 외부 LLM API를 사용하지 않는다. Localhost Ollama만 허용한다.
+6. 외부 LLM API를 사용하지 않는다. Loopback endpoint의 Ollama만 허용한다. 실제 런타임은 SSH 터널 뒤에 있는 사용자 소유 연구실 서버이며, 원격 호스트나 IP를 `base_url`에 직접 넣지 않는다.
 7. API key나 credential을 Markdown에 저장하지 않는다.
 8. AI 결과는 Source, chunk, evidence provenance를 유지한다.
 9. Source title이나 특정 논문의 concept 이름을 생산 코드에 하드코딩하지 않는다.
@@ -49,13 +51,15 @@ PDF에서 AI-Wiki까지 이어지는 local-first 파이프라인은 기술적으
 - Vault: `G:\내 드라이브\Obsidian\GILVault\GIL`
 - Google Drive 동기화 경로이므로 모든 write는 same-filesystem temp file과 atomic replace를 사용한다.
 - Python: 기본 3.11.9, 3.14도 설치됨
-- Local LLM provider: Ollama
-- Endpoint: `http://localhost:11434`
-- Model: `qwen3.5:4b`
+- Local LLM provider: Ollama. 사용자 소유 연구실 GPU 서버(RTX A5000 24GB × 2, Ubuntu)에서 `127.0.0.1`에만 바인딩해 실행한다.
+- Endpoint: `http://localhost:11435` (SSH local port forward로 서버의 `127.0.0.1:11434`에 연결)
+- Model: `qwen3.5:27b`
 - Temperature: `0.0`
-- Timeout: `180`초
+- Timeout: `300`초 (첫 요청의 모델 로딩 시간 포함)
+- keep_alive: `2m`, unload_after_run: `true`
 - Config: `.automation/config/local_llm.json`
-- 외부 network LLM 호출: 없음
+- 외부 LLM API 호출: 없음. 서버로 넘어가는 데이터는 LLM 요청에 담긴 Source chunk와 후보 요약뿐이다.
+- 데스크톱 Ollama(11434)는 파이프라인에서 쓰지 않는다.
 
 주요 로컬 의존성:
 
@@ -72,25 +76,30 @@ PDF에서 AI-Wiki까지 이어지는 local-first 파이프라인은 기술적으
 
 ```text
 branch: main
-HEAD: cd892c2 Refine AI Wiki concept ontology rules
+HEAD: 9f350e0 Add semantic quality gate and method-aware weak supervision
 previous stable tag: ai-wiki-v1
 tag commit: 110bd8e Complete AI Wiki v1 end-to-end pipeline
 ```
 
-Semantic quality gate와 method-aware weak supervision 변경은 아직 커밋되지 않았다. 현재 수정/생성 파일:
+Semantic quality gate와 method-aware weak supervision 변경은 `9f350e0`으로 커밋됐다. Stage S(LLM 백엔드 전환) 변경은 아직 커밋되지 않았다. 현재 수정/생성 파일:
 
 ```text
 M  .automation/README.md
-M  .automation/knowledge_os/ai_wiki/curator.py
+M  .automation/config/local_llm.json
 M  .automation/knowledge_os/ai_wiki/engine.py
 M  .automation/knowledge_os/ai_wiki/models.py
-M  .automation/knowledge_os/ai_wiki/preprocess.py
-M  .automation/knowledge_os/ai_wiki/schema.py
 M  .automation/knowledge_os/cli.py
-M  .automation/tests/test_ai_wiki.py
+M  .automation/knowledge_os/llm/__init__.py
+M  .automation/knowledge_os/llm/base.py
+M  .automation/knowledge_os/llm/config.py
+M  .automation/knowledge_os/llm/fake.py
+M  .automation/knowledge_os/llm/ollama.py
 M  .automation/tests/test_ai_wiki_preprocess.py
+M  .automation/tests/test_llm.py
+M  90_System/Docs/AI_BOUNDARIES.md
 M  90_System/Docs/ARCHITECTURE.md
-?? .automation/knowledge_os/ai_wiki/quality.py
+M  90_System/Docs/CLAUDE_CODE_HANDOFF.md
+?? .automation/tests/test_llm_unload.py
 ```
 
 이 변경을 되돌리거나 덮어쓰지 말고 현재 상태 위에서 작업한다.
@@ -230,6 +239,21 @@ Source Markdown
 - Quality failure exit code는 `6`, technical failure는 `5`다.
 - 어느 한 Source라도 실패하면 전체 `--write`와 state update를 차단한다.
 
+### 11. Stage S: 연구실 서버 LLM 런타임과 GPU 반납
+
+- 모든 LLM 호출은 SSH local port forward(`localhost:11435` → 서버 `127.0.0.1:11434`)를 거쳐 연구실 서버 Ollama의 `qwen3.5:27b`로 간다.
+- 터널은 사용자가 연다: `ssh -N -L 11435:127.0.0.1:11434 <Host별칭>`. 파이프라인은 터널을 열거나 `ssh`를 실행하지 않는다.
+- Loopback-only 검증은 그대로다. 원격 호스트나 IP는 `base_url`로 허용하지 않는다.
+- PDF ingestion, preprocessing, chunking, dedup, role, quality gate, 파일 쓰기는 데스크톱에서 실행한다. 서버로 가는 것은 LLM 요청뿐이다.
+- Config에 `keep_alive`(0~3600초 정수 또는 `30s`·`2m` 형식, 최대 `60m`)와 `unload_after_run`(bool, 기본 `false`)을 추가했다. 새 키가 없는 기존 config는 이전과 같은 의미로 로드된다.
+- `keep_alive`를 설정하면 모든 generate payload 최상위에 들어간다. 설정하지 않으면 payload는 이전과 같다.
+- `LLMProvider.unload(model)`은 `/api/generate`에 `{"model": ..., "keep_alive": 0}`만 보낸다. LLM 호출이 아니며 `stats.unload_requests`로 따로 센다.
+- `ai-wiki scan`과 `llm-test`는 `unload_after_run=true`이고 LLM 호출이 1회 이상이면 종료 직전에 unload를 정확히 1회 보낸다. Pass(0), quality failure(6), technical failure(5) 경로 모두 같고, `--write`일 때는 note 쓰기와 state update 뒤에 보낸다.
+- Unload 실패는 warning 한 줄로만 남고 exit code를 바꾸지 않는다. 재시도하지 않는다.
+- 연결 실패(터널이 꺼짐 등)는 technical failure다. 다른 주소나 포트로 fallback하지 않는다.
+- 4B를 전제로 둔 제약은 유지한다: output token 1024, `think=false`, `temperature=0`, JSON repair 최대 1회, chunk당 concept 1개, Source당 concept 최대 12개.
+- 서버에서 다른 작업이 같은 모델을 동시에 쓰면 unload 때문에 그 작업이 다음 요청에서 모델을 다시 로딩한다. 그때는 `unload_after_run`을 `false`로 두고 `keep_alive`만으로 관리한다.
+
 ## 핵심 코드 지도
 
 - `.automation/run.py`: CLI entrypoint
@@ -237,8 +261,9 @@ Source Markdown
 - `.automation/knowledge_os/paper_ingest.py`: PDF ingestion orchestration
 - `.automation/knowledge_os/pdf_extractors.py`: extractor abstraction
 - `.automation/knowledge_os/io_utils.py`: atomic write
-- `.automation/knowledge_os/llm/base.py`: provider request/response contract
-- `.automation/knowledge_os/llm/ollama.py`: localhost Ollama transport
+- `.automation/knowledge_os/llm/base.py`: provider request/response contract, `unload`, `request_unload`
+- `.automation/knowledge_os/llm/config.py`: loopback 검증, `keep_alive`·`unload_after_run` 검증
+- `.automation/knowledge_os/llm/ollama.py`: loopback Ollama transport, `keep_alive` payload, unload 요청
 - `.automation/knowledge_os/llm/fake.py`: unit-test provider
 - `.automation/knowledge_os/ai_wiki/source.py`: Source validation과 chunking
 - `.automation/knowledge_os/ai_wiki/preprocess.py`: in-memory filtering과 method subsection detection
@@ -250,20 +275,98 @@ Source Markdown
 - `.automation/knowledge_os/ai_wiki/render.py`: AI-Wiki Markdown rendering
 - `.automation/tests/test_ai_wiki.py`: extraction/selection/write safety tests
 - `.automation/tests/test_ai_wiki_preprocess.py`: processing view와 method detection tests
+- `.automation/tests/test_llm.py`: config, loopback, payload, unload 요청 tests
+- `.automation/tests/test_llm_unload.py`: `ai-wiki scan`·`llm-test` 실행 종료 시 unload와 exit code tests
 
 ## 최신 테스트 상태
 
-2026-10-04 기준:
+2026-10-04 기준 (Stage S 반영 후):
 
 ```text
 python -m unittest discover -s .automation/tests
-Ran 133 tests in 13.703s
+Ran 174 tests in 12.118s
 OK
 ```
 
-Unit test는 실제 Ollama를 호출하지 않는다. 작은 synthetic fixture와 FakeLLMProvider만 사용한다.
+Unit test는 실제 Ollama를 호출하지 않는다. 작은 synthetic fixture, fake transport, FakeLLMProvider만 사용한다.
 
 ## 실제 A-MEM dry-run 결과
+
+현재 기준선은 `qwen3.5:27b` 결과다. 모델이 다르므로 아래 두 결과는 직접 비교할 수 없다.
+
+### `qwen3.5:27b` 기준선 (2026-10-04, Stage S 이후)
+
+사용자가 실행한 명령:
+
+```powershell
+python ".automation\run.py" ai-wiki scan --source "A-MEM.md"
+```
+
+주요 통계:
+
+```text
+mode: dry-run
+source_characters: 93064
+processing_characters: 45097
+chunk_count: 13
+average_chunk_size: 3534.2
+maximum_chunk_size: 3997
+llm_calls: 14
+json_repairs: 0
+timeout_failures: 0
+curator_calls: 1
+unload_requests: 1
+failures: none
+```
+
+추출 후보:
+
+```text
+Agentic Memory                     role=method_entity primary_source_entity=true
+Agentic Memory Architecture        role=mechanism
+A-MEM                              role=method_entity primary_source_entity=true
+A-MEM Agentic Memory Architecture  role=method_entity
+A-MEM Agentic Memory System        role=method_entity
+A-MEM Retrieval Mechanism          role=mechanism
+Memory Evolution                   role=mechanism
+Memory Evolution Mechanism         role=mechanism
+MemoryBank                         role=mechanism
+```
+
+Curator trigger는 deterministic duplicate-risk group 2개(`agentic memory`, `memory evolution`)였다.
+
+Curator 선택:
+
+```text
+Agentic Memory
+A-MEM Retrieval Mechanism
+Memory Evolution
+```
+
+Quality gate:
+
+```text
+status: pass
+reasons: none
+```
+
+서버 쪽 세션이 요청 로그와 대조한 결과:
+
+- `tags` + `generate` 14쌍과 unload 1건이 모두 200이었고 경고·오류는 0건이었다.
+- Unload 뒤 GPU 0 여유가 23.9GiB(전체 24.2GiB)로 돌아왔다.
+- 다른 요청과 겹치지 않은 구간에서 호출당 26~31초, scan 전체는 8분 46초였다.
+- 이 Ollama는 요청을 하나씩 처리한다. 서버의 다른 작업과 겹친 첫 두 호출은 대기 때문에 1분 10초대였다. Timeout 300초에는 여유가 있었다.
+
+관찰:
+
+- Gate는 pass지만 method subsection 4개 중 mechanism 후보와 맞은 것은 `memory evolution` 하나다. `note construction`과 `link generation`은 후보 9개 어디에도 없다. Gate는 mechanism/component가 하나만 맞아도 통과한다.
+- `A-MEM Retrieval Mechanism`의 curator 사유는 space complexity와 retrieval time이다. 3.4절이 아니라 4.6 Scaling Analysis에서 나왔을 수 있다(미확인).
+- 후보 9개 중 5개가 Source 시스템 자체의 변형이다. 4b 때와 같은 패턴이다.
+- `A-MEM`의 identity가 `mem`으로 정규화된다. 선행 관사 제거 규칙이 `A-`에 적용된 것으로 보인다(미확인). Stage S 이전부터 있던 동작이다.
+- `MemoryBank`는 baseline인데 role이 `mechanism`으로 추출됐고 curator가 제외했다.
+- 이 dry-run 뒤에 `--write`는 하지 않았다. Dry-run report에는 note 본문과 evidence가 나오지 않아 이 출력만으로는 수동 검토를 할 수 없다.
+
+### `qwen3.5:4b` 결과 (Stage S 이전, 참고용)
 
 사용자가 실행한 명령:
 
@@ -455,7 +558,7 @@ G:\내 드라이브\Obsidian\GILVault\GIL
 현재 상태:
 - PDF ingestion, processing view, Local Ollama structured extraction, deterministic identity deduplication, source-level curator, semantic quality gate가 구현되어 있다.
 - 현재 uncommitted changes를 되돌리거나 덮어쓰지 마라.
-- 전체 unit test 133개가 통과한다.
+- 전체 unit test 174개가 통과한다.
 - 실제 A-MEM dry-run에서 methodology subsection 4개는 정확히 감지했지만 general extraction이 named mechanism 후보를 만들지 못해 quality_gate가 failed 되었다.
 - curator는 선택 전용이므로 누락 후보를 생성할 수 없다.
 
@@ -523,7 +626,7 @@ Dry-run report 추가:
 ## Claude Code 첫 실행 체크리스트
 
 1. `git status --short`로 위 uncommitted 변경이 존재하는지 확인한다.
-2. 현재 tests를 먼저 실행해 baseline 133 tests 통과를 확인한다.
+2. 현재 tests를 먼저 실행해 baseline 174 tests 통과를 확인한다.
 3. 실제 Source와 AI-Wiki 파일을 수정하지 않는다.
 4. `preprocess.py`가 subsection body/provenance를 제공할 수 있도록 최소 확장한다.
 5. 기존 general extraction, curator, quality gate를 재사용한다.
@@ -549,7 +652,8 @@ Quality gate가 `pass`이고 selected concepts와 evidence가 수동 검토를 �
 
 ## 알려진 주의점
 
-- README의 과거 환경 감사 문구 중 Ollama가 설치되지 않았다는 문장은 초기 감사 기록이다. 현재는 사용자가 Ollama와 `qwen3.5:4b` 동작을 확인했다.
+- README의 과거 환경 감사 문구 중 Ollama가 설치되지 않았다는 문장은 초기 감사 기록이다. 이후 사용자가 데스크톱 Ollama와 `qwen3.5:4b` 동작을 확인했고, Stage S부터는 연구실 서버의 `qwen3.5:27b`를 쓴다.
+- 실제 실행 전에 SSH 터널(`localhost:11435`)이 열려 있어야 한다. 터널이 꺼져 있으면 `ai-wiki scan`은 technical failure(exit 5)로 끝나고 다른 주소로 재시도하지 않는다.
 - `quality_gate.status`는 report contract상 `pass|warning|failed`지만 현재 구현은 실질적으로 pass 또는 failed를 사용한다.
 - Dry-run에서도 malformed JSON diagnostic artifact는 `.automation/state/diagnostics/`에 생성될 수 있다.
 - Google Drive 경로와 한글 경로를 고려해 path를 문자열 조합으로 다루지 말고 `pathlib.Path`를 사용한다.

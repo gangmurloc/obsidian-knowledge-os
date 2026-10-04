@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..io_utils import atomic_write_json, atomic_write_text
-from ..llm import GenerateRequest, LLMProvider, ProviderTimeoutError
+from ..llm import GenerateRequest, LLMProvider, ProviderTimeoutError, request_unload
 from .curator import (
     CURATOR_SELECTION_SCHEMA,
     MAX_FINAL_CONCEPTS,
@@ -56,6 +57,7 @@ from .schema import (
 from .source import DEFAULT_MAX_CHUNK_CHARS, chunk_source, load_source_note
 
 
+LOGGER = logging.getLogger(__name__)
 STATE_RELATIVE_PATH = Path(".automation/state/ai_wiki.json")
 AI_WIKI_RELATIVE_PATH = Path("30_Resources/AI-Wiki")
 SOURCE_ROOT_RELATIVE_PATH = Path("30_Resources/Sources")
@@ -339,7 +341,46 @@ def process_ai_wiki(
     write: bool = False,
     today: date | None = None,
     max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    unload_after_run: bool = False,
 ) -> ProcessingPlan:
+    plan = ProcessingPlan()
+    completed = False
+    try:
+        _build_and_apply_plan(
+            plan,
+            vault_root=vault_root,
+            provider=provider,
+            model_name=model_name,
+            scope=scope,
+            write=write,
+            today=today,
+            max_chunk_chars=max_chunk_chars,
+        )
+        completed = True
+    finally:
+        # Reached after any AI-Wiki write and state update, on every exit path.
+        if unload_after_run and plan.stats.llm_calls > 0:
+            plan.stats.unload_requests += 1
+            unload_warning = request_unload(provider, model_name)
+            if unload_warning:
+                plan.warnings.append(unload_warning)
+                if not completed:
+                    # The plan is discarded when the run raises, so log instead.
+                    LOGGER.warning("%s", unload_warning)
+    return plan
+
+
+def _build_and_apply_plan(
+    plan: ProcessingPlan,
+    *,
+    vault_root: Path,
+    provider: LLMProvider,
+    model_name: str,
+    scope: ScanScope,
+    write: bool,
+    today: date | None,
+    max_chunk_chars: int,
+) -> None:
     root = vault_root.resolve()
     output_root = (root / AI_WIKI_RELATIVE_PATH).resolve()
     state_path = root / STATE_RELATIVE_PATH
@@ -348,7 +389,6 @@ def process_ai_wiki(
     all_paths = _source_paths(root)
     all_relative_paths = {path.resolve().relative_to(root).as_posix() for path in all_paths}
     selected_paths = _select_paths(root, scope, all_paths)
-    plan = ProcessingPlan()
     plan.removed_sources = sorted(set(previous_sources) - all_relative_paths)
     for relative in plan.removed_sources:
         plan.warnings.append(
@@ -908,5 +948,3 @@ def process_ai_wiki(
             next_state = copy.deepcopy(state)
             next_state["sources"].update(plan.state_updates)
             atomic_write_json(state_path, next_state, overwrite=True)
-
-    return plan
