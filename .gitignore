@@ -17,6 +17,9 @@ __pycache__/
 # Large PDF originals
 _assets/PDF/
 
+# Source notes hold the full text of papers and web pages; keep them local
+30_Resources/Sources/
+
 # Temporary
 *.tmp
 *.log
