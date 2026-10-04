@@ -72,37 +72,19 @@ Stage S 이후 `qwen3.5:27b` 기준선에서는 quality gate가 pass한다. 그�
 
 ## Git 상태
 
-현재 branch와 checkpoint:
-
 ```text
 branch: main
-HEAD: 9f350e0 Add semantic quality gate and method-aware weak supervision
-previous stable tag: ai-wiki-v1
-tag commit: 110bd8e Complete AI Wiki v1 end-to-end pipeline
+remote: origin https://github.com/gangmurloc/obsidian-knowledge-os (public)
+stable tag: ai-wiki-v1 (Complete AI Wiki v1 end-to-end pipeline)
 ```
 
-Semantic quality gate와 method-aware weak supervision 변경은 `9f350e0`으로 커밋됐다. Stage S(LLM 백엔드 전환) 변경은 아직 커밋되지 않았다. 현재 수정/생성 파일:
+- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들.
+- Stage S까지 모두 커밋됐다. 미커밋 변경은 없다.
+- 2026-10-04에 공개 저장소로 올리면서 `30_Resources/Sources/`를 모든 커밋에서 제거했다. 논문 전문을 공개 재배포하지 않기 위해서다. 그래서 그 전에 문서나 프롬프트에 적어 둔 커밋 해시(`110bd8e`, `cd892c2`, `9f350e0`, `4951c90` 등)는 더 이상 유효하지 않다. 해시는 `git log --oneline`으로 확인한다.
+- Source 노트는 이제 git이 추적하지 않는다(`.gitignore`). 파일은 vault에 그대로 있고 Google Drive로만 보존된다.
+- 기록을 다시 쓰기 전의 전체 저장소는 `C:\Users\GIL\obsidian-knowledge-os-backup-20261004\vault-before-publish.bundle`에 백업돼 있다.
 
-```text
-M  .automation/README.md
-M  .automation/config/local_llm.json
-M  .automation/knowledge_os/ai_wiki/engine.py
-M  .automation/knowledge_os/ai_wiki/models.py
-M  .automation/knowledge_os/cli.py
-M  .automation/knowledge_os/llm/__init__.py
-M  .automation/knowledge_os/llm/base.py
-M  .automation/knowledge_os/llm/config.py
-M  .automation/knowledge_os/llm/fake.py
-M  .automation/knowledge_os/llm/ollama.py
-M  .automation/tests/test_ai_wiki_preprocess.py
-M  .automation/tests/test_llm.py
-M  90_System/Docs/AI_BOUNDARIES.md
-M  90_System/Docs/ARCHITECTURE.md
-M  90_System/Docs/CLAUDE_CODE_HANDOFF.md
-?? .automation/tests/test_llm_unload.py
-```
-
-이 변경을 되돌리거나 덮어쓰지 말고 현재 상태 위에서 작업한다.
+작업을 시작할 때 미커밋 변경이 있으면 되돌리거나 덮어쓰지 말고 그 위에서 작업한다.
 
 ## 지금까지의 진행 과정
 
@@ -625,7 +607,7 @@ Dry-run report 추가:
 
 ## Claude Code 첫 실행 체크리스트
 
-1. `git status --short`로 위 uncommitted 변경이 존재하는지 확인한다.
+1. `git status --short`로 미커밋 변경이 있는지 확인한다.
 2. 현재 tests를 먼저 실행해 baseline 174 tests 통과를 확인한다.
 3. 실제 Source와 AI-Wiki 파일을 수정하지 않는다.
 4. `preprocess.py`가 subsection body/provenance를 제공할 수 있도록 최소 확장한다.
