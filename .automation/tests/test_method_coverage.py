@@ -590,11 +590,14 @@ class MethodCoverageReportTests(MethodCoverageTestCase):
                 response(),
                 response(concept("Handler Selection Policy", excerpts=(Q1_LEAD,))),
                 response(),
+                # 3.1 has no mechanism or component, so it gets one targeted call.
+                response(),
                 curator_response("Record Normalization Pipeline", "Handler Selection Policy"),
             )
         )
         rows = self._rows(plan)
 
+        self.assertEqual(plan.stats.recovery_calls, 1)
         self.assertIn("role=method_entity", plan.candidate_concepts[1])
         self.assertIn(
             "| candidates: title_cover=n evidence_cover=n "
@@ -616,11 +619,14 @@ class MethodCoverageReportTests(MethodCoverageTestCase):
                 response(),
                 response(),
                 response(),
+                # 3.1 is uncovered, so it gets one targeted call.
+                response(),
                 curator_response("Handler Selection Policy"),
             )
         )
         rows = self._rows(plan)
 
+        self.assertEqual(plan.stats.recovery_calls, 1)
         self.assertTrue(
             rows["state construction"].endswith(
                 "| candidates: title_cover=n evidence_cover=n "
@@ -700,12 +706,15 @@ class MethodCoverageReportTests(MethodCoverageTestCase):
         plan, _provider = self._run(
             (
                 response(concept("Stepwise Controller", excerpts=("Alpha module handles one step.",))),
+                # 24 subsections are uncovered; targeted calls stop at the limit of 8.
+                *(response() for _ in range(8)),
                 curator_response("Stepwise Controller"),
             ),
             max_chunk_chars=4_000,
         )
 
         self.assertEqual(len(names), 25)
+        self.assertEqual(plan.stats.recovery_calls, 8)
         self.assertEqual(plan.stats.chunk_count, 1)
         self.assertEqual(len(plan.method_coverage), 21)
         self.assertEqual(plan.method_coverage[-1], f"{SOURCE_RELATIVE}: ... (+5 more)")
@@ -804,6 +813,9 @@ class ReportOnlyRegressionTests(MethodCoverageTestCase):
                 (
                     response(concept("General Design One", role="core_concept", excerpts=("x",))),
                     response(concept("General Design Two", role="core_concept", excerpts=("y",))),
+                    # Both subsections are uncovered, so each gets one targeted call.
+                    response(),
+                    response(),
                     curator_response("General Design One"),
                 ),
             ),

@@ -1198,11 +1198,15 @@ class AIWikiTests(unittest.TestCase):
             response_texts=(
                 response(concept_value("General Design One")),
                 response(concept_value("General Design Two")),
+                # Both subsections are uncovered, so each gets one targeted call.
+                response(),
+                response(),
                 curator_response(first),
             )
         )
         plan = self._run(provider)
 
+        self.assertEqual(plan.stats.recovery_calls, 2)
         self.assertEqual(plan.stats.curator_calls, 1)
         self.assertIn("explicit-method coverage failure", plan.curator_trigger_reason[0])
         self.assertEqual(plan.quality_gate_status, "failed")
@@ -1243,11 +1247,15 @@ class AIWikiTests(unittest.TestCase):
                 response(concept_value("NEXUS Planner", role="method_entity")),
                 response(concept_value("NEXUS Retriever", role="method_entity")),
                 response(concept_value("Selective Routing", role="mechanism")),
+                # The first two subsections are uncovered, so each gets one targeted call.
+                response(),
+                response(),
                 curator_response(selected),
             )
         )
         plan = self._run(provider)
 
+        self.assertEqual(plan.stats.recovery_calls, 2)
         self.assertEqual(plan.stats.curator_calls, 1)
         self.assertIn("source-entity dominance", plan.curator_trigger_reason[0])
         self.assertEqual(plan.quality_gate_status, "pass")

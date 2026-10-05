@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -11,7 +13,7 @@ from typing import Any
 
 from ..io_utils import atomic_write_json, atomic_write_text
 from ..llm import GenerateRequest, LLMProvider, ProviderTimeoutError, request_unload
-from .coverage import build_method_coverage
+from .coverage import COVER_ROLES, build_method_coverage, uncovered_method_subsections
 from .curator import (
     CURATOR_SELECTION_SCHEMA,
     MAX_FINAL_CONCEPTS,
@@ -30,12 +32,17 @@ from .models import (
     PlannedChange,
     ProcessingPlan,
     ProtectedNoteError,
+    SourceChunk,
+    SourceNote,
     SourceValidationError,
     StructuredOutputError,
 )
 from .ontology import concept_exclusion_reason, suggest_relations
 from .preprocess import (
     AI_PROCESSING_VIEW_VERSION,
+    OMISSION_MARKER_PATTERN,
+    AIProcessingView,
+    MethodSubsection,
     build_ai_processing_view,
     canonicalize_heading_text,
 )
@@ -50,6 +57,7 @@ from .schema import (
     CONCEPT_EXTRACTION_SCHEMA,
     build_extraction_prompt,
     build_json_repair_prompt,
+    build_targeted_extraction_prompt,
     concept_filename,
     concept_identity,
     merge_concepts,
@@ -64,6 +72,9 @@ AI_WIKI_RELATIVE_PATH = Path("30_Resources/AI-Wiki")
 SOURCE_ROOT_RELATIVE_PATH = Path("30_Resources/Sources")
 MAX_CONCEPTS_PER_SOURCE = MAX_FINAL_CONCEPTS
 AI_WIKI_MAX_OUTPUT_TOKENS = 1_024
+# Targeted extraction calls for method subsections that the general pass left uncovered.
+MAX_METHOD_RECOVERY_CALLS = 8
+MAX_METHOD_RECOVERY_ROWS = 20
 DIAGNOSTICS_RELATIVE_PATH = Path(".automation/state/diagnostics")
 MAX_DIAGNOSTIC_RESPONSE_CHARS = 256_000
 THINK_BLOCK_PATTERN = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
@@ -333,6 +344,294 @@ def _write_parse_diagnostic(
     return path.relative_to(vault_root).as_posix(), None
 
 
+def _extract_concepts(
+    *,
+    provider: LLMProvider,
+    model_name: str,
+    system: str,
+    prompt: str,
+    plan: ProcessingPlan,
+    vault_root: Path,
+    source_relative_path: str,
+    chunk_id: str,
+) -> list[Concept]:
+    """Run one structured extraction call, with at most one JSON syntax repair."""
+    plan.stats.llm_calls += 1
+    response = provider.generate(
+        GenerateRequest(
+            prompt=prompt,
+            model=model_name,
+            system=system,
+            temperature=0.0,
+            max_output_tokens=AI_WIKI_MAX_OUTPUT_TOKENS,
+            response_format=CONCEPT_EXTRACTION_SCHEMA,
+            think=False,
+        )
+    )
+    if response.done_reason == "length":
+        raise StructuredOutputError(
+            "Local LLM output reached the 1024-token limit; "
+            "syntax repair was not attempted because content was truncated"
+        )
+    try:
+        return parse_concept_response(response.text)
+    except MalformedJSONError as parse_exc:
+        plan.stats.json_repairs += 1
+        repair_system, repair_prompt = build_json_repair_prompt(response.text)
+        repair_raw_response: str | None = None
+        repair_error: str | None = None
+        try:
+            plan.stats.llm_calls += 1
+            repair_response = provider.generate(
+                GenerateRequest(
+                    prompt=repair_prompt,
+                    model=model_name,
+                    system=repair_system,
+                    temperature=0.0,
+                    max_output_tokens=AI_WIKI_MAX_OUTPUT_TOKENS,
+                    response_format=CONCEPT_EXTRACTION_SCHEMA,
+                    think=False,
+                )
+            )
+            if repair_response.done_reason == "length":
+                raise StructuredOutputError(
+                    "JSON repair output reached the 1024-token limit and was truncated"
+                )
+            repair_raw_response = repair_response.text
+            extracted = parse_concept_response(repair_raw_response)
+        except Exception as repair_exc:
+            if isinstance(repair_exc, ProviderTimeoutError):
+                plan.stats.timeout_failures += 1
+            repair_error = f"{type(repair_exc).__name__}: {repair_exc}"
+            diagnostic_path, diagnostic_error = _write_parse_diagnostic(
+                vault_root=vault_root,
+                source_relative_path=source_relative_path,
+                chunk_id=chunk_id,
+                model_name=model_name,
+                parse_error=str(parse_exc),
+                raw_response=response.text,
+                repair_raw_response=repair_raw_response,
+                repair_error=repair_error,
+            )
+            if diagnostic_path:
+                plan.warnings.append(f"JSON parse diagnostic: {diagnostic_path}")
+            if diagnostic_error:
+                plan.warnings.append(diagnostic_error)
+            raise StructuredOutputError(
+                f"JSON syntax repair failed after one attempt: {repair_error}"
+            ) from repair_exc
+
+        diagnostic_path, diagnostic_error = _write_parse_diagnostic(
+            vault_root=vault_root,
+            source_relative_path=source_relative_path,
+            chunk_id=chunk_id,
+            model_name=model_name,
+            parse_error=str(parse_exc),
+            raw_response=response.text,
+            repair_raw_response=repair_raw_response,
+            repair_error=None,
+        )
+        if diagnostic_path:
+            plan.warnings.append(
+                f"JSON syntax repaired once; diagnostic: {diagnostic_path}"
+            )
+        if diagnostic_error:
+            plan.warnings.append(diagnostic_error)
+        return extracted
+
+
+def _admit_candidates(
+    extracted: list[Concept],
+    *,
+    chunk_id: str,
+    source: SourceNote,
+    plan: ProcessingPlan,
+    candidates: dict[str, Concept],
+    candidate_chunks: dict[str, set[str]],
+) -> list[str]:
+    """Attach provenance and merge extracted concepts into the pool by identity."""
+    admitted: list[str] = []
+    for concept in extracted:
+        exclusion_reason = concept_exclusion_reason(
+            concept.title,
+            source.metadata.get("title"),
+        )
+        if exclusion_reason:
+            plan.skipped.append(
+                f"{source.relative_path} {chunk_id}: "
+                f"concept candidate {concept.title!r} excluded because it "
+                f"{exclusion_reason}"
+            )
+            continue
+        _attach_provenance(concept, source.link, chunk_id)
+        identity = concept_identity(concept.title)
+        candidate_chunks.setdefault(identity, set()).add(chunk_id)
+        if identity in candidates:
+            merge_concepts(candidates[identity], concept)
+        else:
+            candidates[identity] = concept
+        admitted.append(identity)
+    return admitted
+
+
+def _subsection_chunk(
+    source: SourceNote,
+    content: str,
+    subsection: MethodSubsection,
+    max_chars: int,
+) -> SourceChunk | None:
+    """The subsection's heading and body as one bounded chunk, or None without a body."""
+    pieces = chunk_source(
+        source,
+        content=content[subsection.start : subsection.end],
+        max_chars=max_chars,
+    )
+    if not pieces:
+        return None
+    first = pieces[0]
+    has_body = any(
+        line.strip()
+        and not line.lstrip().startswith("#")
+        and not OMISSION_MARKER_PATTERN.match(line)
+        for line in first.text.splitlines()
+    )
+    if not has_body:
+        return None
+    digest = hashlib.sha256(
+        f"{source.content_hash}:{subsection.subsection_id}:{first.text}".encode("utf-8")
+    ).hexdigest()[:16]
+    return SourceChunk(
+        source=source,
+        index=0,
+        identifier=f"subsection-{subsection.subsection_id.removeprefix('ms-')}-{digest}",
+        text=first.text,
+        start=subsection.start + (first.start or 0),
+        end=subsection.start + (first.end or 0),
+    )
+
+
+def _recover_uncovered_subsections(
+    *,
+    plan: ProcessingPlan,
+    provider: LLMProvider,
+    model_name: str,
+    vault_root: Path,
+    source: SourceNote,
+    processing_view: AIProcessingView,
+    chunks: list[SourceChunk],
+    candidates: dict[str, Concept],
+    candidate_chunks: dict[str, set[str]],
+    chunk_sections: dict[str, tuple[str, ...]],
+    max_chunk_chars: int,
+    apply_roles: Callable[[], None],
+) -> list[SourceChunk] | None:
+    """Run one targeted extraction per method subsection that nothing covers yet.
+
+    A targeted candidate goes through the same schema validation, identity merge,
+    role assignment, curation, and quality gate as any other candidate. Returns the
+    targeted chunks, or None when a call failed and the Source must stop.
+    """
+    subsections = processing_view.method_subsection_spans
+    if not subsections:
+        return []
+    label = source.relative_path
+    uncovered = uncovered_method_subsections(
+        content=processing_view.content,
+        subsections=subsections,
+        chunks=chunks,
+        candidates=candidates,
+        source_title=source.metadata.get("title"),
+    )
+    targeted_chunks: list[SourceChunk] = []
+    outcomes: list[tuple[MethodSubsection, SourceChunk | None, list[str], str]] = []
+    for subsection in uncovered:
+        chunk = _subsection_chunk(source, processing_view.content, subsection, max_chunk_chars)
+        if chunk is None:
+            outcomes.append((subsection, None, [], "not targeted: no body text"))
+            continue
+        if len(targeted_chunks) >= MAX_METHOD_RECOVERY_CALLS:
+            outcomes.append(
+                (
+                    subsection,
+                    None,
+                    [],
+                    f"not targeted: limit of {MAX_METHOD_RECOVERY_CALLS} calls reached",
+                )
+            )
+            continue
+        plan.stats.recovery_calls += 1
+        system, prompt = build_targeted_extraction_prompt(
+            chunk,
+            subsection_heading=subsection.canonical_heading,
+        )
+        try:
+            extracted = _extract_concepts(
+                provider=provider,
+                model_name=model_name,
+                system=system,
+                prompt=prompt,
+                plan=plan,
+                vault_root=vault_root,
+                source_relative_path=label,
+                chunk_id=chunk.identifier,
+            )
+        except Exception as exc:
+            if isinstance(exc, ProviderTimeoutError):
+                plan.stats.timeout_failures += 1
+            plan.failures.append(
+                f"{label} {chunk.identifier}: targeted extraction for "
+                f"[{subsection.subsection_id}] failed: {type(exc).__name__}: {exc}"
+            )
+            return None
+        targeted_chunks.append(chunk)
+        chunk_sections[chunk.identifier] = _chunk_section_names(chunk.text)
+        admitted = _admit_candidates(
+            extracted,
+            chunk_id=chunk.identifier,
+            source=source,
+            plan=plan,
+            candidates=candidates,
+            candidate_chunks=candidate_chunks,
+        )
+        outcomes.append((subsection, chunk, admitted, ""))
+
+    apply_roles()
+    recovered = 0
+    rows: list[str] = []
+    for subsection, chunk, admitted, reason in outcomes:
+        row = f"{label}: [{subsection.subsection_id}] {subsection.canonical_heading}"
+        if chunk is None:
+            rows.append(f"{row} {reason}")
+            continue
+        row = f"{row} chunk={chunk.identifier}"
+        if not admitted:
+            rows.append(f"{row} -> (no concept)")
+            continue
+        concept = candidates[admitted[0]]
+        if concept.role in COVER_ROLES:
+            recovered += 1
+            rows.append(f"{row} -> {concept.title}({concept.role}) recovered")
+        else:
+            rows.append(
+                f"{row} -> {concept.title}({concept.role}) "
+                "not counted: role is not mechanism or component"
+            )
+    plan.method_recovery.append(
+        f"{label}: detected_subsections={len(subsections)} "
+        f"covered_before_recovery={len(subsections) - len(uncovered)} "
+        f"targeted_subsections={len(targeted_chunks)} "
+        f"recovered_concepts={recovered} "
+        f"still_uncovered={len(uncovered) - recovered} "
+        f"recovery_calls={len(targeted_chunks)}"
+    )
+    plan.method_recovery.extend(rows[:MAX_METHOD_RECOVERY_ROWS])
+    if len(rows) > MAX_METHOD_RECOVERY_ROWS:
+        plan.method_recovery.append(
+            f"{label}: ... (+{len(rows) - MAX_METHOD_RECOVERY_ROWS} more)"
+        )
+    return targeted_chunks
+
+
 def process_ai_wiki(
     *,
     vault_root: Path,
@@ -487,89 +786,16 @@ def _build_and_apply_plan(
                 methodology_subsections=chunk_methodology_subsections,
             )
             try:
-                plan.stats.llm_calls += 1
-                response = provider.generate(
-                    GenerateRequest(
-                        prompt=prompt,
-                        model=model_name,
-                        system=system,
-                        temperature=0.0,
-                        max_output_tokens=AI_WIKI_MAX_OUTPUT_TOKENS,
-                        response_format=CONCEPT_EXTRACTION_SCHEMA,
-                        think=False,
-                    )
+                extracted = _extract_concepts(
+                    provider=provider,
+                    model_name=model_name,
+                    system=system,
+                    prompt=prompt,
+                    plan=plan,
+                    vault_root=root,
+                    source_relative_path=source.relative_path,
+                    chunk_id=chunk.identifier,
                 )
-                if response.done_reason == "length":
-                    raise StructuredOutputError(
-                        "Local LLM output reached the 1024-token limit; "
-                        "syntax repair was not attempted because content was truncated"
-                    )
-                try:
-                    extracted = parse_concept_response(response.text)
-                except MalformedJSONError as parse_exc:
-                    plan.stats.json_repairs += 1
-                    repair_system, repair_prompt = build_json_repair_prompt(response.text)
-                    repair_raw_response: str | None = None
-                    repair_error: str | None = None
-                    try:
-                        plan.stats.llm_calls += 1
-                        repair_response = provider.generate(
-                            GenerateRequest(
-                                prompt=repair_prompt,
-                                model=model_name,
-                                system=repair_system,
-                                temperature=0.0,
-                                max_output_tokens=AI_WIKI_MAX_OUTPUT_TOKENS,
-                                response_format=CONCEPT_EXTRACTION_SCHEMA,
-                                think=False,
-                            )
-                        )
-                        if repair_response.done_reason == "length":
-                            raise StructuredOutputError(
-                                "JSON repair output reached the 1024-token limit and was truncated"
-                            )
-                        repair_raw_response = repair_response.text
-                        extracted = parse_concept_response(repair_raw_response)
-                    except Exception as repair_exc:
-                        if isinstance(repair_exc, ProviderTimeoutError):
-                            plan.stats.timeout_failures += 1
-                        repair_error = f"{type(repair_exc).__name__}: {repair_exc}"
-                        diagnostic_path, diagnostic_error = _write_parse_diagnostic(
-                            vault_root=root,
-                            source_relative_path=source.relative_path,
-                            chunk_id=chunk.identifier,
-                            model_name=model_name,
-                            parse_error=str(parse_exc),
-                            raw_response=response.text,
-                            repair_raw_response=repair_raw_response,
-                            repair_error=repair_error,
-                        )
-                        if diagnostic_path:
-                            plan.warnings.append(
-                                f"JSON parse diagnostic: {diagnostic_path}"
-                            )
-                        if diagnostic_error:
-                            plan.warnings.append(diagnostic_error)
-                        raise StructuredOutputError(
-                            f"JSON syntax repair failed after one attempt: {repair_error}"
-                        ) from repair_exc
-
-                    diagnostic_path, diagnostic_error = _write_parse_diagnostic(
-                        vault_root=root,
-                        source_relative_path=source.relative_path,
-                        chunk_id=chunk.identifier,
-                        model_name=model_name,
-                        parse_error=str(parse_exc),
-                        raw_response=response.text,
-                        repair_raw_response=repair_raw_response,
-                        repair_error=None,
-                    )
-                    if diagnostic_path:
-                        plan.warnings.append(
-                            f"JSON syntax repaired once; diagnostic: {diagnostic_path}"
-                        )
-                    if diagnostic_error:
-                        plan.warnings.append(diagnostic_error)
             except Exception as exc:
                 if isinstance(exc, ProviderTimeoutError):
                     plan.stats.timeout_failures += 1
@@ -582,36 +808,46 @@ def _build_and_apply_plan(
                 plan.warnings.append(
                     f"{source.relative_path} {chunk.identifier}: no concepts extracted"
                 )
-            for concept in extracted:
-                exclusion_reason = concept_exclusion_reason(
-                    concept.title,
-                    source.metadata.get("title"),
-                )
-                if exclusion_reason:
-                    plan.skipped.append(
-                        f"{source.relative_path} {chunk.identifier}: "
-                        f"concept candidate {concept.title!r} excluded because it "
-                        f"{exclusion_reason}"
-                    )
-                    continue
-                _attach_provenance(concept, source.link, chunk.identifier)
-                identity = concept_identity(concept.title)
-                candidate_chunks.setdefault(identity, set()).add(chunk.identifier)
-                if identity in local_candidates:
-                    merge_concepts(local_candidates[identity], concept)
-                else:
-                    local_candidates[identity] = concept
+            _admit_candidates(
+                extracted,
+                chunk_id=chunk.identifier,
+                source=source,
+                plan=plan,
+                candidates=local_candidates,
+                candidate_chunks=candidate_chunks,
+            )
 
         if source_failed:
             continue
 
-        _apply_source_context_roles(
-            local_candidates,
-            source_title=source.metadata.get("title"),
-            methodology_subsections=processing_view.methodology_subsections,
-            supporting_chunks=candidate_chunks,
+        def apply_roles() -> None:
+            _apply_source_context_roles(
+                local_candidates,
+                source_title=source.metadata.get("title"),
+                methodology_subsections=processing_view.methodology_subsections,
+                supporting_chunks=candidate_chunks,
+                chunk_sections=chunk_sections,
+            )
+
+        # Roles decide which subsections count as covered, so they are applied before
+        # the recovery pass and again once its candidates have joined the pool.
+        apply_roles()
+        targeted_chunks = _recover_uncovered_subsections(
+            plan=plan,
+            provider=provider,
+            model_name=model_name,
+            vault_root=root,
+            source=source,
+            processing_view=processing_view,
+            chunks=chunks,
+            candidates=local_candidates,
+            candidate_chunks=candidate_chunks,
             chunk_sections=chunk_sections,
+            max_chunk_chars=max_chunk_chars,
+            apply_roles=apply_roles,
         )
+        if targeted_chunks is None:
+            continue
         # Kept only for the read-only coverage diagnostics computed after selection.
         role_candidates = dict(local_candidates)
 
@@ -823,6 +1059,7 @@ def _build_and_apply_plan(
                 candidates=role_candidates,
                 selected=set(local_candidates),
                 source_title=source.metadata.get("title"),
+                targeted_chunks=targeted_chunks,
             )
         except Exception as exc:
             plan.warnings.append(
@@ -843,7 +1080,7 @@ def _build_and_apply_plan(
         plan.state_updates[source.relative_path] = {
             "sha256": source.content_hash,
             "processing_view_version": AI_PROCESSING_VIEW_VERSION,
-            "chunks": [chunk.identifier for chunk in chunks],
+            "chunks": [chunk.identifier for chunk in (*chunks, *targeted_chunks)],
             "concepts": sorted(local_candidates),
         }
 

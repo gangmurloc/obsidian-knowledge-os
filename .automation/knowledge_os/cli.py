@@ -260,6 +260,7 @@ def _print_ai_wiki_plan(
     print(f"  json_repairs: {plan.stats.json_repairs}")
     print(f"  timeout_failures: {plan.stats.timeout_failures}")
     print(f"  curator_calls: {plan.stats.curator_calls}")
+    print(f"  recovery_calls: {plan.stats.recovery_calls}")
     print(f"  unload_requests: {plan.stats.unload_requests}")
     print("quality_gate:")
     print(f"  status: {plan.quality_gate_status}")
@@ -289,6 +290,7 @@ def _print_ai_wiki_plan(
         ("curator_trigger_reason", plan.curator_trigger_reason),
         ("selected_representatives", plan.selected_representatives),
         ("dropped_aliases", plan.dropped_aliases),
+        ("method_recovery", plan.method_recovery),
         ("method_coverage", plan.method_coverage),
         ("evidence_locatability", plan.evidence_locatability),
     ):

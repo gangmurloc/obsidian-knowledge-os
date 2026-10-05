@@ -1,7 +1,8 @@
-"""Read-only diagnostics that relate candidate evidence to method subsections.
+"""Relates candidate evidence to method subsections.
 
-Nothing here feeds role assignment, curation, or the quality gate. The output is a
-report: it contains identifiers, headings, titles, roles, and counts, never Source text.
+``uncovered_method_subsections`` decides which subsections get a targeted extraction
+call. ``build_method_coverage`` is a read-only report; its output contains identifiers,
+headings, titles, roles, and counts, never Source text.
 """
 
 from __future__ import annotations
@@ -108,6 +109,88 @@ def locate_excerpt(
     return ExcerptLocator(content).locate(excerpt, preferred_range=preferred_range)
 
 
+def _located_evidence_starts(
+    content: str,
+    chunks: Sequence[SourceChunk],
+    candidates: Mapping[str, Concept],
+) -> dict[str, list[int]]:
+    """Start offsets of every candidate's evidence that can be located, by identity."""
+    locator = ExcerptLocator(content)
+    chunk_ranges = {
+        chunk.identifier: (chunk.start, chunk.end)
+        for chunk in chunks
+        if chunk.start is not None and chunk.end is not None
+    }
+    starts: dict[str, list[int]] = {}
+    for identity, concept in candidates.items():
+        located = (
+            locator.locate(item.source_excerpt, preferred_range=chunk_ranges.get(item.chunk_id))
+            for item in concept.evidence
+        )
+        starts[identity] = [position[0] for position in located if position is not None]
+    return starts
+
+
+def _evidence_in_span(subsection: MethodSubsection, starts: Sequence[int]) -> int:
+    return sum(subsection.start <= start < subsection.end for start in starts)
+
+
+def _cover(
+    subsection: MethodSubsection,
+    identities: Collection[str],
+    *,
+    candidates: Mapping[str, Concept],
+    evidence_starts: Mapping[str, Sequence[int]],
+    source_title: object,
+) -> tuple[bool, bool]:
+    """Whether a mechanism or component covers the subsection by title and by evidence."""
+    concepts = [
+        (identity, candidates[identity])
+        for identity in identities
+        if identity in candidates and candidates[identity].role in COVER_ROLES
+    ]
+    title_cover = any(
+        candidate_matches_methodology_subsection(
+            concept,
+            source_title=source_title,
+            methodology_subsections=(subsection.canonical_heading,),
+        )
+        for _identity, concept in concepts
+    )
+    evidence_cover = any(
+        _evidence_in_span(subsection, evidence_starts.get(identity, ()))
+        for identity, _concept in concepts
+    )
+    return title_cover, evidence_cover
+
+
+def uncovered_method_subsections(
+    *,
+    content: str,
+    subsections: Sequence[MethodSubsection],
+    chunks: Sequence[SourceChunk],
+    candidates: Mapping[str, Concept],
+    source_title: object,
+) -> list[MethodSubsection]:
+    """Subsections that no mechanism or component covers by title or by located evidence."""
+    if not subsections:
+        return []
+    evidence_starts = _located_evidence_starts(content, chunks, candidates)
+    return [
+        subsection
+        for subsection in subsections
+        if not any(
+            _cover(
+                subsection,
+                candidates,
+                candidates=candidates,
+                evidence_starts=evidence_starts,
+                source_title=source_title,
+            )
+        )
+    ]
+
+
 def _numbers(values: Sequence[int]) -> str:
     return ",".join(str(value) for value in values) or "-"
 
@@ -126,6 +209,7 @@ def build_method_coverage(
     candidates: Mapping[str, Concept],
     selected: Collection[str],
     source_title: object,
+    targeted_chunks: Sequence[SourceChunk] = (),
 ) -> tuple[list[str], str]:
     """Return the ``method_coverage`` rows and the ``evidence_locatability`` line.
 
@@ -133,22 +217,14 @@ def build_method_coverage(
     ``selected`` holds the identities that survived selection. A subsection is
     title-covered by the existing quality-gate rule and evidence-covered when a
     mechanism or component has located evidence that starts inside its span.
+    ``targeted_chunks`` only helps place evidence that a targeted call produced.
     """
-    locator = ExcerptLocator(content)
-    chunk_ranges = {
-        chunk.identifier: (chunk.start, chunk.end)
-        for chunk in chunks
-        if chunk.start is not None and chunk.end is not None
-    }
-    evidence_starts: dict[str, list[int]] = {}
-    evidence_total = 0
-    for identity, concept in candidates.items():
-        located = (
-            locator.locate(item.source_excerpt, preferred_range=chunk_ranges.get(item.chunk_id))
-            for item in concept.evidence
-        )
-        evidence_starts[identity] = [position[0] for position in located if position is not None]
-        evidence_total += len(concept.evidence)
+    evidence_starts = _located_evidence_starts(
+        content,
+        [*chunks, *targeted_chunks],
+        candidates,
+    )
+    evidence_total = sum(len(concept.evidence) for concept in candidates.values())
     located_total = sum(len(starts) for starts in evidence_starts.values())
     locatability = (
         f"{source_label}: located {located_total}/{evidence_total} evidence "
@@ -159,33 +235,11 @@ def build_method_coverage(
 
     rows: list[str] = []
     for subsection in subsections[:MAX_SUBSECTION_ROWS]:
-        in_span = {
-            identity: sum(subsection.start <= start < subsection.end for start in starts)
-            for identity, starts in sorted(evidence_starts.items())
-        }
-        in_span = {identity: count for identity, count in in_span.items() if count}
-
-        def cover(identities: Collection[str]) -> str:
-            concepts = [
-                (identity, candidates[identity])
-                for identity in identities
-                if identity in candidates and candidates[identity].role in COVER_ROLES
-            ]
-            title_cover = any(
-                candidate_matches_methodology_subsection(
-                    concept,
-                    source_title=source_title,
-                    methodology_subsections=(subsection.canonical_heading,),
-                )
-                for _identity, concept in concepts
-            )
-            evidence_cover = any(identity in in_span for identity, _concept in concepts)
-            return f"title_cover={_flag(title_cover)} evidence_cover={_flag(evidence_cover)}"
-
         entries = [
             f"{candidates[identity].title}({candidates[identity].role}, "
             f"located {count}/{len(candidates[identity].evidence)})"
-            for identity, count in in_span.items()
+            for identity, starts in sorted(evidence_starts.items())
+            if (count := _evidence_in_span(subsection, starts))
         ]
         shown = entries[:MAX_IN_SPAN_CANDIDATES]
         if len(entries) > len(shown):
@@ -198,14 +252,26 @@ def build_method_coverage(
             and chunk.start < subsection.end
             and subsection.start < chunk.end
         ]
+        cover = {
+            label: _cover(
+                subsection,
+                identities,
+                candidates=candidates,
+                evidence_starts=evidence_starts,
+                source_title=source_title,
+            )
+            for label, identities in (("candidates", candidates), ("selected", selected))
+        }
         rows.append(
             f"{source_label}: [{subsection.subsection_id}] {subsection.canonical_heading} "
             f"pages={_numbers(subsection.pages)} "
             f"heading_chunks={_numbers(heading_chunks.get(subsection.subsection_id, ()))} "
             f"offset_chunks={_numbers(offset_chunks)} "
-            f"| candidates: {cover(candidates)} "
-            f"| selected: {cover(selected)} "
-            f"| in_span: {', '.join(shown) or '(none)'}"
+            + "".join(
+                f"| {label}: title_cover={_flag(title)} evidence_cover={_flag(evidence)} "
+                for label, (title, evidence) in cover.items()
+            )
+            + f"| in_span: {', '.join(shown) or '(none)'}"
         )
     if len(subsections) > MAX_SUBSECTION_ROWS:
         rows.append(f"{source_label}: ... (+{len(subsections) - MAX_SUBSECTION_ROWS} more)")

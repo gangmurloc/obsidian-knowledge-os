@@ -112,6 +112,7 @@ class ProcessingStats:
     json_repairs: int = 0
     timeout_failures: int = 0
     curator_calls: int = 0
+    recovery_calls: int = 0
     unload_requests: int = 0
 
     @property
@@ -143,6 +144,7 @@ class ProcessingPlan:
     selected_representatives: list[str] = field(default_factory=list)
     dropped_aliases: list[str] = field(default_factory=list)
     methodology_subsections: list[str] = field(default_factory=list)
+    method_recovery: list[str] = field(default_factory=list)
     method_coverage: list[str] = field(default_factory=list)
     evidence_locatability: list[str] = field(default_factory=list)
     quality_gate_status: str = "pass"
