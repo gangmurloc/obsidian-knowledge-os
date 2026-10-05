@@ -6,7 +6,7 @@ domain:
   - knowledge-management
   - software-engineering
 created: 2026-10-04
-updated: 2026-10-04
+updated: 2026-10-05
 human_verified: false
 ---
 
@@ -28,7 +28,7 @@ human_verified: false
 
 PDF에서 AI-Wiki까지 이어지는 local-first 파이프라인은 기술적으로 동작한다. 현재 병목은 여러 method subsection이 하나의 일반 chunk에 섞일 때 `1 concept per chunk` 제약 때문에 명시적 mechanism이 후보로 생성되지 않는 문제다. Curator와 semantic quality gate는 이 문제를 정상적으로 감지하지만, curator는 기존 후보만 선택할 수 있으므로 누락된 mechanism을 복구할 수 없다.
 
-Stage S 이후 `qwen3.5:27b` 기준선에서는 quality gate가 pass한다. 그래도 A-MEM의 method subsection 4개 중 2개는 후보에 없으므로 이 병목은 남아 있다.
+Stage S 이후 `qwen3.5:27b` 기준선에서는 quality gate가 pass한다. 그래도 이 병목은 남아 있다. Stage 1 진단으로 확인한 결과, A-MEM의 method subsection 4개 중 3개에는 그 구간에 근거를 둔 후보가 하나도 없다. Cover 정의만 바꿔서는 복구되지 않으므로 다음 단계는 subsection-targeted extraction이다.
 
 ## 절대 규칙
 
@@ -78,8 +78,8 @@ remote: origin https://github.com/gangmurloc/obsidian-knowledge-os (public)
 stable tag: ai-wiki-v1 (Complete AI Wiki v1 end-to-end pipeline)
 ```
 
-- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들.
-- Stage S까지 모두 커밋됐다. 미커밋 변경은 없다.
+- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋.
+- Stage 1까지 모두 커밋됐다. 미커밋 변경은 없다.
 - 2026-10-04에 공개 저장소로 올리면서 `30_Resources/Sources/`를 모든 커밋에서 제거했다. 논문 전문을 공개 재배포하지 않기 위해서다. 그래서 그 전에 문서나 프롬프트에 적어 둔 커밋 해시(`110bd8e`, `cd892c2`, `9f350e0`, `4951c90` 등)는 더 이상 유효하지 않다. 해시는 `git log --oneline`으로 확인한다.
 - Source 노트는 이제 git이 추적하지 않는다(`.gitignore`). 파일은 vault에 그대로 있고 Google Drive로만 보존된다.
 - 기록을 다시 쓰기 전의 전체 저장소는 `C:\Users\GIL\obsidian-knowledge-os-backup-20261004\vault-before-publish.bundle`에 백업돼 있다.
@@ -236,6 +236,18 @@ Source Markdown
 - 4B를 전제로 둔 제약은 유지한다: output token 1024, `think=false`, `temperature=0`, JSON repair 최대 1회, chunk당 concept 1개, Source당 concept 최대 12개.
 - 서버에서 다른 작업이 같은 모델을 동시에 쓰면 unload 때문에 그 작업이 다음 요청에서 모델을 다시 로딩한다. 그때는 `unload_after_run`을 `false`로 두고 `keep_alive`만으로 관리한다.
 
+### 12. Stage 1: method subsection span과 coverage 진단
+
+- 동작 변경과 추가 LLM 호출 없이 dry-run report에 `method_coverage`와 `evidence_locatability` 섹션을 추가했다. Role, curator, quality gate, exit code는 그대로다.
+- `AIProcessingView.method_subsection_spans`가 subsection별 id, heading, 문자 span, page를 제공한다. 기존 `methodology_subsections`는 그대로 유지된다.
+- Span은 heading 줄에서 시작해 그 subsection을 닫는 heading 직전에서 끝난다. 두 heading 모두 번호가 있으면 번호 깊이로, 아니면 Markdown 레벨로 판단한다. `### Page N`은 span을 끝내지 않는다.
+- `SourceChunk`에 processing view 기준 `start`/`end` offset이 생겼다. Chunk 텍스트와 identifier는 바뀌지 않았다.
+- `locate_excerpt`는 evidence excerpt의 위치를 결정론적으로 찾는다. NFKC, casefold, 강조기호 제거, 공백 축약 뒤 정확히 일치해야 하고 fuzzy match는 없다.
+- `title_cover`는 현재 quality gate 규칙이고, `evidence_cover`는 mechanism/component 후보의 evidence가 span 안에 있는지다.
+- Report에는 id, heading, title, role, 숫자만 나오고 Source 본문은 나오지 않는다. Source당 subsection 20행, 행당 `in_span` 후보 5개가 상한이다.
+- 진단 계산이 실패하면 scan은 계속되고 warning 한 줄만 남는다.
+- 형식 설명은 `.automation/README.md`의 "Method Coverage Diagnostics" 절에 있다.
+
 ## 핵심 코드 지도
 
 - `.automation/run.py`: CLI entrypoint
@@ -253,20 +265,22 @@ Source Markdown
 - `.automation/knowledge_os/ai_wiki/ontology.py`: identity와 relation suggestions
 - `.automation/knowledge_os/ai_wiki/curator.py`: duplicate risk와 source-level selection
 - `.automation/knowledge_os/ai_wiki/quality.py`: semantic quality gate
+- `.automation/knowledge_os/ai_wiki/coverage.py`: evidence 위치 찾기와 method coverage 진단 (읽기 전용)
 - `.automation/knowledge_os/ai_wiki/engine.py`: end-to-end orchestration
 - `.automation/knowledge_os/ai_wiki/render.py`: AI-Wiki Markdown rendering
 - `.automation/tests/test_ai_wiki.py`: extraction/selection/write safety tests
 - `.automation/tests/test_ai_wiki_preprocess.py`: processing view와 method detection tests
 - `.automation/tests/test_llm.py`: config, loopback, payload, unload 요청 tests
 - `.automation/tests/test_llm_unload.py`: `ai-wiki scan`·`llm-test` 실행 종료 시 unload와 exit code tests
+- `.automation/tests/test_method_coverage.py`: subsection span, chunk offset, excerpt 위치, coverage report tests
 
 ## 최신 테스트 상태
 
-2026-10-04 기준 (Stage S 반영 후):
+2026-10-05 기준 (Stage 1 반영 후):
 
 ```text
 python -m unittest discover -s .automation/tests
-Ran 174 tests in 12.118s
+Ran 204 tests in 13.613s
 OK
 ```
 
@@ -347,6 +361,30 @@ reasons: none
 - `A-MEM`의 identity가 `mem`으로 정규화된다. 선행 관사 제거 규칙이 `A-`에 적용된 것으로 보인다(미확인). Stage S 이전부터 있던 동작이다.
 - `MemoryBank`는 baseline인데 role이 `mechanism`으로 추출됐고 curator가 제외했다.
 - 이 dry-run 뒤에 `--write`는 하지 않았다. Dry-run report에는 note 본문과 evidence가 나오지 않아 이 출력만으로는 수동 검토를 할 수 없다.
+
+### Stage 1 진단 실행 (2026-10-04, `qwen3.5:27b`)
+
+Stage 1 구현 뒤 같은 명령으로 다시 실행했다. 통계와 선택 결과는 기준선과 같다: `llm_calls: 14`, `curator_calls: 1`, `unload_requests: 1`, gate pass, 선택 3개(`Agentic Memory`, `A-MEM Retrieval Mechanism`, `Memory Evolution`), 실패 없음. 후보는 8개였다(기준선은 9개). `temperature=0`이어도 실행마다 후보가 조금 달라진다.
+
+```text
+method_coverage:
+  [ms-c3d558db] note construction pages=4 heading_chunks=4 offset_chunks=4 | candidates: title_cover=n evidence_cover=n | selected: title_cover=n evidence_cover=n | in_span: (none)
+  [ms-51290a96] link generation pages=4 heading_chunks=4 offset_chunks=4 | candidates: title_cover=n evidence_cover=n | selected: title_cover=n evidence_cover=n | in_span: (none)
+  [ms-f3cc630f] memory evolution pages=4,5 heading_chunks=4 offset_chunks=4,5 | candidates: title_cover=y evidence_cover=y | selected: title_cover=y evidence_cover=y | in_span: Memory Evolution(mechanism, located 1/3)
+  [ms-009e7175] retrieve relative memory pages=5 heading_chunks=5 offset_chunks=5 | candidates: title_cover=n evidence_cover=n | selected: title_cover=n evidence_cover=n | in_span: (none)
+evidence_locatability:
+  located 26/33 evidence across 8 candidates
+```
+
+해석:
+
+- `note construction`, `link generation`, `retrieve relative memory`에는 어떤 role의 후보도 그 span 안에 evidence가 없다. 후보가 있었는데 role이나 제목 때문에 놓친 것(가설 A)이 아니라, 그 구간에 근거를 둔 후보가 아예 없다(가설 B).
+- 따라서 cover 정의를 evidence 기준으로 바꾸는 것만으로는 이 세 subsection이 복구되지 않는다. Uncovered subsection만 대상으로 하는 targeted extraction이 필요하다.
+- 3.1, 3.2, 3.3의 heading이 모두 chunk 4 하나에 있고, 3.3의 뒷부분과 3.4가 chunk 5에 있다. Chunk당 concept이 1개이므로 두 chunk에서 나올 수 있는 후보는 최대 2개다.
+- `memory evolution`은 heading이 chunk 4에만 있고 본문이 chunk 5로 이어진다. Heading 줄 기준 연결(`heading_chunks`)로는 chunk 5가 빠진다.
+- `A-MEM Retrieval Mechanism`의 evidence는 `retrieve relative memory` span 안에 없다.
+- Evidence 33개 중 7개는 위치를 찾지 못했다. 이 7개가 어느 후보의 것인지는 report에 나오지 않으므로, 일부가 빈 구간에 속할 가능성은 남아 있다. Evidence 기준 cover를 도입하면 이 비율(79%)만큼만 판정에 쓸 수 있다.
+- 이 실행은 41분 걸렸다(기준선은 8분 46초). Timeout은 없었지만 호출당 평균이 3분에 가깝다. 원인은 서버 로그로 확인해야 한다.
 
 ### `qwen3.5:4b` 결과 (Stage S 이전, 참고용)
 
@@ -540,7 +578,7 @@ G:\내 드라이브\Obsidian\GILVault\GIL
 현재 상태:
 - PDF ingestion, processing view, Local Ollama structured extraction, deterministic identity deduplication, source-level curator, semantic quality gate가 구현되어 있다.
 - 현재 uncommitted changes를 되돌리거나 덮어쓰지 마라.
-- 전체 unit test 174개가 통과한다.
+- 전체 unit test 204개가 통과한다.
 - 실제 A-MEM dry-run에서 methodology subsection 4개는 정확히 감지했지만 general extraction이 named mechanism 후보를 만들지 못해 quality_gate가 failed 되었다.
 - curator는 선택 전용이므로 누락 후보를 생성할 수 없다.
 
@@ -608,7 +646,7 @@ Dry-run report 추가:
 ## Claude Code 첫 실행 체크리스트
 
 1. `git status --short`로 미커밋 변경이 있는지 확인한다.
-2. 현재 tests를 먼저 실행해 baseline 174 tests 통과를 확인한다.
+2. 현재 tests를 먼저 실행해 baseline 204 tests 통과를 확인한다.
 3. 실제 Source와 AI-Wiki 파일을 수정하지 않는다.
 4. `preprocess.py`가 subsection body/provenance를 제공할 수 있도록 최소 확장한다.
 5. 기존 general extraction, curator, quality gate를 재사용한다.

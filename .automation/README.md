@@ -305,6 +305,28 @@ Technical failures and semantic quality failures are reported separately. After 
 
 The report prints `quality_gate.status` as `pass`, `warning`, or `failed` plus Source-scoped reasons. A failed gate blocks the entire `--write` operation before any AI-Wiki note or processing state is written and exits with code `6`. Provider, timeout, malformed JSON, and curator errors remain technical failures, exit with code `5`, and also block the entire write rather than allowing a partial multi-Source commit.
 
+### Method Coverage Diagnostics
+
+The report includes two read-only sections, `method_coverage` and `evidence_locatability`. They never change roles, curation, the quality gate, or exit codes, and they add no LLM call. If the diagnostics themselves fail, the scan continues and one warning is recorded.
+
+`method_coverage` prints one row per named method subsection:
+
+```text
+<source>: [<subsection_id>] <heading> pages=<..> heading_chunks=<..> offset_chunks=<..> | candidates: title_cover=<y/n> evidence_cover=<y/n> | selected: title_cover=<y/n> evidence_cover=<y/n> | in_span: <title>(<role>, located <k>/<n>), ...
+```
+
+- A subsection span runs from its heading line to the heading that closes it. When both headings are numbered, the numbers decide: 3.1 runs through 3.1.1 and ends at 3.2 or 4. Otherwise the Markdown level decides. A span also ends where its method section ends, and `### Page N` lines never end a span.
+- `subsection_id` is a short stable hash of the canonical heading and its occurrence number.
+- `heading_chunks` lists the chunks whose text contains the heading line. `offset_chunks` lists the chunks whose character range overlaps the span, so it also includes a chunk that holds only the continued body.
+- `title_cover` is the rule the quality gate uses today: a `mechanism` or `component` whose title signature equals the heading. `evidence_cover` is `y` when a `mechanism` or `component` has an evidence excerpt located inside the span.
+- `candidates` covers every candidate after role assignment, and `selected` covers the final selection.
+- `in_span` lists candidates of any role that have evidence in the span. `k` is the number of that candidate's evidence items located in this span, and `n` is its total number of evidence items.
+- A Source with no detected method subsection prints `no methodology subsections detected`. The quality gate's coverage check does not run for such a Source.
+
+`evidence_locatability` prints `located <k>/<n> evidence across <m> candidates` for each Source. An excerpt is located when it appears in the processing view after NFKC normalization, case folding, removal of `*`, `_`, and backtick emphasis marks, and whitespace collapsing. There is no fuzzy matching. When an excerpt appears more than once, the position inside its own chunk is preferred. Text that occurs only inside an omission marker is not located.
+
+Rows contain identifiers, headings, titles, roles, and counts only, never Source text. Output is capped at 20 subsection rows per Source and 5 `in_span` candidates per row.
+
 ### Ontology Normalization
 
 Concept identity is deterministic and local. It applies Unicode NFKC normalization, case folding, punctuation and hyphen normalization, repeated-whitespace normalization, and conservative removal of a leading English article (`a`, `an`, or `the`). Exact normalized identities merge; lexical overlap alone never merges concepts.
