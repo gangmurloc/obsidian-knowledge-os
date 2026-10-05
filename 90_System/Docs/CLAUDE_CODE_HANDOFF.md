@@ -6,7 +6,7 @@ domain:
   - knowledge-management
   - software-engineering
 created: 2026-10-04
-updated: 2026-10-05
+updated: 2026-10-06
 human_verified: false
 ---
 
@@ -28,7 +28,7 @@ human_verified: false
 
 PDF에서 AI-Wiki까지 이어지는 local-first 파이프라인은 기술적으로 동작한다. 현재 병목은 여러 method subsection이 하나의 일반 chunk에 섞일 때 `1 concept per chunk` 제약 때문에 명시적 mechanism이 후보로 생성되지 않는 문제다. Curator와 semantic quality gate는 이 문제를 정상적으로 감지하지만, curator는 기존 후보만 선택할 수 있으므로 누락된 mechanism을 복구할 수 없다.
 
-Stage S 이후 `qwen3.5:27b` 기준선에서는 quality gate가 pass한다. 그래도 이 병목은 남아 있다. Stage 1 진단으로 확인한 결과, A-MEM의 method subsection 4개 중 3개에는 그 구간에 근거를 둔 후보가 하나도 없다. Cover 정의만 바꿔서는 복구되지 않으므로 다음 단계는 subsection-targeted extraction이다.
+Stage 1 진단으로 A-MEM의 method subsection 4개 중 3개에 근거를 둔 후보가 없다는 것을 확인했고, Stage 3에서 그런 subsection만 따로 추출하는 targeted extraction을 구현했다. `qwen3.5:27b`로 실행한 결과 3개가 모두 복구돼 method subsection 4개가 전부 최종 선택에 반영됐다. 남은 과제는 quality gate의 cover 판정이 여전히 제목 일치에 의존한다는 점, method root 감지 범위가 좁다는 점, 그리고 A-MEM 한 편으로만 검증했다는 점이다.
 
 ## 절대 규칙
 
@@ -78,8 +78,8 @@ remote: origin https://github.com/gangmurloc/obsidian-knowledge-os (public)
 stable tag: ai-wiki-v1 (Complete AI Wiki v1 end-to-end pipeline)
 ```
 
-- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋.
-- Stage 1까지 모두 커밋됐다. 미커밋 변경은 없다.
+- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋.
+- Stage 3까지 모두 커밋됐다. 미커밋 변경은 없다.
 - 2026-10-04에 공개 저장소로 올리면서 `30_Resources/Sources/`를 모든 커밋에서 제거했다. 논문 전문을 공개 재배포하지 않기 위해서다. 그래서 그 전에 문서나 프롬프트에 적어 둔 커밋 해시(`110bd8e`, `cd892c2`, `9f350e0`, `4951c90` 등)는 더 이상 유효하지 않다. 해시는 `git log --oneline`으로 확인한다.
 - Source 노트는 이제 git이 추적하지 않는다(`.gitignore`). 파일은 vault에 그대로 있고 Google Drive로만 보존된다.
 - 기록을 다시 쓰기 전의 전체 저장소는 `C:\Users\GIL\obsidian-knowledge-os-backup-20261004\vault-before-publish.bundle`에 백업돼 있다.
@@ -248,6 +248,21 @@ Source Markdown
 - 진단 계산이 실패하면 scan은 계속되고 warning 한 줄만 남는다.
 - 형식 설명은 `.automation/README.md`의 "Method Coverage Diagnostics" 절에 있다.
 
+### 13. Stage 3: method subsection targeted extraction
+
+- 일반 추출과 role 할당 뒤에, cover되지 않은 method subsection마다 targeted 추출을 한 번씩 호출한다. Cowork 프롬프트 없이 이 문서의 "Targeted extraction 설계 원칙"을 명세로 삼아 구현했다.
+- Cover 판정(대상 선정용): mechanism/component 후보가 제목으로 heading과 일치하거나, 그 후보의 evidence가 subsection span 안에서 발견되면 cover로 본다. Cover된 subsection은 호출하지 않는다.
+- 입력은 그 subsection의 heading과 본문뿐이고, 일반 chunk 최대 크기 한 개 분량으로 자른다. Source 전체를 다시 보내지 않는다. 본문이 없는 heading은 호출하지 않는다.
+- 상한: subsection당 호출 1회와 후보 최대 1개, Source당 targeted 호출 최대 8회(문서 순서). `think=false`, `temperature=0`, output token 1024, JSON repair 최대 1회는 일반 추출과 같다.
+- Targeted prompt는 그 subsection이 설명하는 mechanism/component만 요구한다. Source 시스템 자체를 반환하지 말고, heading만으로 concept을 만들지 말라고 지시한다. 생산 코드에 특정 논문이나 concept 이름은 없다.
+- Targeted 후보도 schema 검증, 제외 규칙, identity 병합, role 할당, curator, quality gate를 그대로 거친다. 호출이 concept을 반환하지 않으면 아무것도 만들지 않는다.
+- Targeted 호출 실패는 technical failure다. 그 Source를 중단하고 전체 write를 막는다. Fallback은 없다.
+- Provenance: targeted 후보의 evidence는 `subsection-<subsection id>-<hash>` 형식의 chunk id를 갖고, processing state의 `chunks` 목록에도 일반 chunk 뒤에 기록된다.
+- Report에 `method_recovery` 섹션과 `statistics.recovery_calls`가 추가됐다. `recovery_calls`는 `llm_calls`에 포함된다.
+- Quality gate, curator, 기존 일반 추출 prompt는 바꾸지 않았다. Gate는 여전히 제목 일치로 cover를 판정하므로, 제목이 heading을 풀어 쓴 형태인 복구 후보는 `recovered`로 집계되고 `evidence_cover=y`로 나오지만 gate의 coverage 검사는 만족시키지 못한다.
+- 일반 추출 로직(호출, JSON repair, 진단 파일)을 `_extract_concepts`로 옮겨 일반 추출과 targeted 추출이 함께 쓴다. 동작은 같다.
+- 형식 설명은 `.automation/README.md`의 "Method Subsection Recovery" 절에 있다.
+
 ## 핵심 코드 지도
 
 - `.automation/run.py`: CLI entrypoint
@@ -273,14 +288,15 @@ Source Markdown
 - `.automation/tests/test_llm.py`: config, loopback, payload, unload 요청 tests
 - `.automation/tests/test_llm_unload.py`: `ai-wiki scan`·`llm-test` 실행 종료 시 unload와 exit code tests
 - `.automation/tests/test_method_coverage.py`: subsection span, chunk offset, excerpt 위치, coverage report tests
+- `.automation/tests/test_method_recovery.py`: targeted extraction 대상 선정, 상한, 실패 처리, provenance tests
 
 ## 최신 테스트 상태
 
-2026-10-05 기준 (Stage 1 반영 후):
+2026-10-06 기준 (Stage 3 반영 후):
 
 ```text
 python -m unittest discover -s .automation/tests
-Ran 204 tests in 13.613s
+Ran 221 tests in 12.845s
 OK
 ```
 
@@ -386,6 +402,59 @@ evidence_locatability:
 - Evidence 33개 중 7개는 위치를 찾지 못했다. 이 7개가 어느 후보의 것인지는 report에 나오지 않으므로, 일부가 빈 구간에 속할 가능성은 남아 있다. Evidence 기준 cover를 도입하면 이 비율(79%)만큼만 판정에 쓸 수 있다.
 - 이 실행은 41분 걸렸다(기준선은 8분 46초). Timeout은 없었지만 호출당 평균이 3분에 가깝다. 원인은 서버 로그로 확인해야 한다.
 
+### Stage 3 실행 (2026-10-05, `qwen3.5:27b`)
+
+Targeted extraction을 구현한 뒤 같은 명령으로 실행했다. 현재 기준선은 이 결과다.
+
+```text
+mode: dry-run
+chunk_count: 13
+llm_calls: 17
+json_repairs: 0
+timeout_failures: 0
+curator_calls: 1
+recovery_calls: 3
+unload_requests: 1
+quality_gate: pass
+failures: none
+```
+
+```text
+method_recovery:
+  detected_subsections=4 covered_before_recovery=1 targeted_subsections=3 recovered_concepts=3 still_uncovered=0 recovery_calls=3
+  [ms-c3d558db] note construction -> Memory Note(component) recovered
+  [ms-51290a96] link generation -> Autonomous Link Generation Mechanism(mechanism) recovered
+  [ms-009e7175] retrieve relative memory -> Retrieve Relative Memory(mechanism) recovered
+method_coverage:
+  [ms-c3d558db] note construction | candidates: title_cover=n evidence_cover=y | selected: title_cover=n evidence_cover=y | in_span: Memory Note(component, located 2/3)
+  [ms-51290a96] link generation | candidates: title_cover=n evidence_cover=y | selected: title_cover=n evidence_cover=y | in_span: Autonomous Link Generation Mechanism(mechanism, located 3/3)
+  [ms-f3cc630f] memory evolution | candidates: title_cover=y evidence_cover=y | selected: title_cover=y evidence_cover=n | in_span: Memory Evolution(mechanism, located 1/3)
+  [ms-009e7175] retrieve relative memory | candidates: title_cover=y evidence_cover=y | selected: title_cover=y evidence_cover=y | in_span: Retrieve Relative Memory(mechanism, located 3/3)
+evidence_locatability:
+  located 34/42 evidence across 12 candidates
+```
+
+후보는 12개였고, curator(duplicate-risk group 2개로 발동)가 5개를 선택했다.
+
+```text
+Agentic Memory
+Autonomous Link Generation Mechanism
+Memory Evolution Mechanism
+Memory Note
+Retrieve Relative Memory
+```
+
+해석:
+
+- 빠져 있던 세 subsection이 모두 복구됐고, method subsection 4개가 전부 최종 선택에 반영됐다. 최종 concept은 3개에서 5개가 됐다.
+- Targeted 호출의 evidence는 대부분 해당 span 안에서 위치가 확인된다(3/3, 3/3, 2/3). Prompt에서 excerpt를 원문 그대로 복사하라고 요구한 효과로 보인다.
+- `Memory Note`와 `Autonomous Link Generation Mechanism`은 제목이 heading과 달라 `title_cover=n`이다. Gate가 pass한 것은 다른 두 subsection이 제목으로 일치해서다. 제목 일치가 하나도 없는 Source였다면 복구에 성공하고도 gate는 실패했을 것이다(F1).
+- `Retrieve Relative Memory`는 제목이 heading과 같다. 본문이 그 이름으로 mechanism을 설명한 것인지, 모델이 heading을 그대로 쓴 것인지는 note 본문을 보고 검토해야 한다.
+- `memory evolution`은 선택된 대표가 `Memory Evolution Mechanism`이라 `selected`의 `evidence_cover`가 `n`이다. Span 안에 evidence가 있는 `Memory Evolution`은 같은 duplicate-risk group의 alias로 탈락했다.
+- 기존 `A-MEM Retrieval Mechanism`은 curator가 탈락시켰다. `MemoryBank`(baseline인데 role이 mechanism)도 탈락했다.
+- 실행 시간은 8분 36초였다(호출 17회).
+- `--write`는 하지 않았다. Dry-run report에는 note 본문과 evidence가 나오지 않아 수동 검토를 할 수 없다.
+
 ### `qwen3.5:4b` 결과 (Stage S 이전, 참고용)
 
 사용자가 실행한 명령:
@@ -465,6 +534,15 @@ schema max concepts per chunk = 1
 Curator는 기존 candidate만 선택할 수 있으므로 누락된 mechanism을 생성해서 복구할 수 없다. Quality gate를 느슨하게 하거나 curator에게 새 concept 생성을 허용하면 안 된다.
 
 ## 다음 목표
+
+이 절의 targeted extraction은 Stage 3으로 구현됐다("지금까지의 진행 과정" 13번). 아래 설계 원칙과 그 뒤의 "Claude Code용 목표 프롬프트"는 구현의 근거로 남겨 둔 기록이다. 남은 작업은 다음과 같다.
+
+1. **첫 `--write` 전 수동 검토 수단.** Dry-run report에는 note 본문과 evidence가 나오지 않는다. 선택된 concept의 본문과 evidence를 쓰기 전에 볼 방법이 필요하다.
+2. **Quality gate의 cover 정의(F1).** Gate는 제목이 heading과 일치해야 cover로 본다. Targeted 추출로 복구한 후보는 제목이 달라도 그 subsection에서 나온 것이 분명하므로, gate가 evidence나 provenance 기준 cover도 인정할지 결정해야 한다. Gate를 바꾸는 일이라 설계 검토가 필요하다.
+3. **Role 승격의 heading 줄 의존(F2).** `_apply_source_context_roles`는 후보를 뽑은 chunk에 heading 줄이 있어야 method_entity를 mechanism으로 올린다. Subsection 본문이 다음 chunk로 이어지면 승격되지 않는다. Offset 기준으로 바꿀 수 있다.
+4. **Method root 감지 확장(F3).** `Our Approach`, `Proposed Method`, `Framework`, 시스템 이름 섹션은 method root로 감지되지 않는다. 이런 Source에서는 복구와 coverage 검사가 둘 다 조용히 꺼진다.
+5. **다른 논문으로 검증.** 지금까지 실제 실행은 A-MEM 한 편뿐이다. 구조가 다른 논문 2~3편으로 dry-run해 과적합 여부를 확인한다.
+6. **실행 간 변동.** `temperature=0`이어도 실행마다 후보가 조금 달라진다. 비교 실험을 하려면 seed 고정을 검토한다.
 
 일반 chunk extraction은 유지하되, 명시적인 core-method subsection 중 아직 mechanism/component candidate로 cover되지 않은 subsection만 대상으로 bounded targeted extraction을 추가한다.
 
@@ -552,7 +630,7 @@ Dry-run에서만 보이는 internal report이며 Source Markdown에 쓰지 않�
 
 ## Claude Code용 목표 프롬프트
 
-아래 블록을 Claude Code에 그대로 전달할 수 있다.
+아래 블록은 Stage 3에서 이미 구현한 작업의 프롬프트다. 기록으로 남겨 두며, 다시 전달할 필요는 없다.
 
 ```text
 현재 Obsidian Knowledge OS의 다음 단계로 methodology-subsection targeted extraction을 구현해라.
@@ -578,7 +656,7 @@ G:\내 드라이브\Obsidian\GILVault\GIL
 현재 상태:
 - PDF ingestion, processing view, Local Ollama structured extraction, deterministic identity deduplication, source-level curator, semantic quality gate가 구현되어 있다.
 - 현재 uncommitted changes를 되돌리거나 덮어쓰지 마라.
-- 전체 unit test 204개가 통과한다.
+- 전체 unit test 221개가 통과한다.
 - 실제 A-MEM dry-run에서 methodology subsection 4개는 정확히 감지했지만 general extraction이 named mechanism 후보를 만들지 못해 quality_gate가 failed 되었다.
 - curator는 선택 전용이므로 누락 후보를 생성할 수 없다.
 
@@ -646,7 +724,7 @@ Dry-run report 추가:
 ## Claude Code 첫 실행 체크리스트
 
 1. `git status --short`로 미커밋 변경이 있는지 확인한다.
-2. 현재 tests를 먼저 실행해 baseline 204 tests 통과를 확인한다.
+2. 현재 tests를 먼저 실행해 baseline 221 tests 통과를 확인한다.
 3. 실제 Source와 AI-Wiki 파일을 수정하지 않는다.
 4. `preprocess.py`가 subsection body/provenance를 제공할 수 있도록 최소 확장한다.
 5. 기존 general extraction, curator, quality gate를 재사용한다.

@@ -110,7 +110,7 @@ To use an Ollama instance on the same machine instead, set `base_url` to `http:/
 
 ## Status
 
-This is a personal project in active development. The pipeline runs end to end, and the test suite passes without network access. The open problem is method coverage: when a paper describes several named mechanisms in one section, the one-concept-per-chunk limit can leave some of them without a candidate. The current state, the latest real dry-run, and the next planned stage are tracked in [CLAUDE_CODE_HANDOFF.md](90_System/Docs/CLAUDE_CODE_HANDOFF.md) (in Korean).
+This is a personal project in active development. The pipeline runs end to end, and the test suite passes without network access. When a paper describes several named mechanisms in one section, the one-concept-per-chunk limit can leave some of them without a candidate, so a recovery pass now gives each uncovered method subsection one targeted extraction call. That pass has been verified on a single paper so far. Open problems are the quality gate's title-based coverage rule, the narrow detection of method sections, and validation on more papers. The current state, the latest real dry-run, and the next planned stage are tracked in [CLAUDE_CODE_HANDOFF.md](90_System/Docs/CLAUDE_CODE_HANDOFF.md) (in Korean).
 
 ## Documentation
 

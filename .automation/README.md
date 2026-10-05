@@ -305,6 +305,33 @@ Technical failures and semantic quality failures are reported separately. After 
 
 The report prints `quality_gate.status` as `pass`, `warning`, or `failed` plus Source-scoped reasons. A failed gate blocks the entire `--write` operation before any AI-Wiki note or processing state is written and exits with code `6`. Provider, timeout, malformed JSON, and curator errors remain technical failures, exit with code `5`, and also block the entire write rather than allowing a partial multi-Source commit.
 
+### Method Subsection Recovery
+
+One chunk can hold several named method subsections, but a chunk returns at most one concept. After the general pass and role assignment, the pipeline therefore gives each uncovered method subsection one targeted extraction call.
+
+- A subsection is covered when a `mechanism` or `component` candidate matches its heading by title or has an evidence excerpt located inside its span. Covered subsections get no call.
+- The call sends only that subsection: its heading and body from the processing view, cut to one chunk of the normal maximum size. The rest of the Source is not sent again. A heading with no body text is not targeted.
+- The targeted prompt asks for the specific mechanism or component the subsection describes, or nothing. It tells the model not to return the Source system itself and not to build a concept from the heading alone.
+- Limits: one call and at most one concept per subsection, and at most 8 targeted calls per Source in document order. The call uses the same schema, `think: false`, `temperature: 0`, the 1,024-token output limit, and the single JSON syntax repair.
+- A targeted candidate is treated like any other: schema validation, exclusion rules, identity merge, role assignment, curation, and the quality gate all apply. Nothing is created from a heading when the call returns no concept.
+- A failed targeted call is a technical failure. It stops that Source and blocks the whole write, with no fallback.
+- Evidence from a targeted call records a chunk identifier of the form `subsection-<subsection id>-<hash>`, and the processing state lists these identifiers after the general chunks.
+
+The quality gate is unchanged and still decides mechanism coverage by title. A recovered concept whose title paraphrases the heading counts as recovered in the report and as `evidence_cover=y` in the diagnostics, but it does not satisfy the gate's coverage check.
+
+`statistics` reports `recovery_calls`, counted inside `llm_calls`. `method_recovery` prints one summary line per Source with method subsections, followed by one row per uncovered subsection:
+
+```text
+<source>: detected_subsections=<n> covered_before_recovery=<n> targeted_subsections=<n> recovered_concepts=<n> still_uncovered=<n> recovery_calls=<n>
+<source>: [<subsection_id>] <heading> chunk=<chunk id> -> <title>(<role>) recovered
+<source>: [<subsection_id>] <heading> chunk=<chunk id> -> <title>(<role>) not counted: role is not mechanism or component
+<source>: [<subsection_id>] <heading> chunk=<chunk id> -> (no concept)
+<source>: [<subsection_id>] <heading> not targeted: no body text
+<source>: [<subsection_id>] <heading> not targeted: limit of 8 calls reached
+```
+
+A concept counts as recovered when, after role assignment, it is a `mechanism` or `component`. Rows are capped at 20 per Source and contain no Source text.
+
 ### Method Coverage Diagnostics
 
 The report includes two read-only sections, `method_coverage` and `evidence_locatability`. They never change roles, curation, the quality gate, or exit codes, and they add no LLM call. If the diagnostics themselves fail, the scan continues and one warning is recorded.
@@ -366,6 +393,8 @@ Related concepts link only when the target concept already exists or is part of 
 - Concept identity handles deterministic article, case, punctuation, whitespace, and hyphen variants; it does not perform semantic ontology matching.
 - `supports`, `extends`, and `contradicts` comparison is conservative and lexical. Subtle contradictions remain warnings for human review rather than triggering automatic replacement.
 - Extraction is limited to 1 concept per chunk and 12 selected concepts per Source; Sources with more candidates depend on one local curator call.
+- Method subsection recovery adds at most 8 targeted calls per Source and reads only the first chunk of a long subsection. Method sections are recognized only under headings such as Method, Methodology, Approach, or Architecture.
+- The quality gate decides method coverage by title, so a recovered concept with a paraphrased title does not satisfy it.
 - The schema asks each concept for ten fields, including the selection role and nested evidence. Small local models can still produce malformed JSON as output length and string escaping complexity increase; v1 uses one syntax-only repair attempt.
 - Layout heuristics are conservative but cannot guarantee correct reading order, tables, or formulas for every publisher PDF. Review extraction warnings and the dry-run before replacement.
 - v1 does not write the optional processing report, classify PARA notes, or delete stale AI-Wiki content.
