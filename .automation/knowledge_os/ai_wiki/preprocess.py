@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 import unicodedata
@@ -52,6 +53,19 @@ NON_METHOD_SUBSECTION_TOKENS = {
 
 
 @dataclass(frozen=True)
+class MethodSubsection:
+    """A named subsection below a core method section, located in the processing view."""
+
+    subsection_id: str
+    canonical_heading: str
+    original_heading: str
+    # Half-open character range, from the heading line to the end of the subsection.
+    start: int
+    end: int
+    pages: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class AIProcessingView:
     content: str
     included_sections: tuple[str, ...] = ()
@@ -62,6 +76,7 @@ class AIProcessingView:
     formula_warnings: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     methodology_subsections: tuple[str, ...] = ()
+    method_subsection_spans: tuple[MethodSubsection, ...] = ()
 
 
 def _heading_title(line: str) -> str | None:
@@ -134,40 +149,119 @@ def _is_named_method_subsection(canonical_title: str) -> bool:
     return bool(canonical_title) and not bool(tokens & NON_METHOD_SUBSECTION_TOKENS)
 
 
-def detect_methodology_subsections(content: str) -> tuple[str, ...]:
-    signals: list[str] = []
+@dataclass(frozen=True)
+class _Heading:
+    offset: int
+    level: int
+    raw_title: str
+    canonical_title: str
+    number: tuple[int, ...] | None
+
+
+def _subsection_id(canonical_heading: str, occurrence: int) -> str:
+    digest = hashlib.sha256(f"{canonical_heading}\n{occurrence}".encode("utf-8")).hexdigest()
+    return f"ms-{digest[:8]}"
+
+
+def _closes_subsection(subsection: _Heading, later: _Heading) -> bool:
+    # Flattened PDFs give every heading the same Markdown level, so numbers win when
+    # both headings have one: 3.1 runs through 3.1.1 and stops at 3.2 or 4.
+    if subsection.number is not None and later.number is not None:
+        return len(later.number) <= len(subsection.number)
+    return later.level <= subsection.level
+
+
+def detect_method_subsection_spans(content: str) -> tuple[MethodSubsection, ...]:
+    headings: list[_Heading] = []
+    page_marks: list[tuple[int, int]] = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        page_match = PAGE_HEADING_PATTERN.fullmatch(line.strip())
+        if page_match:
+            page_marks.append((offset, int(page_match.group("page"))))
+        else:
+            heading = _heading_info(line)
+            if heading is not None:
+                level, raw_title = heading
+                headings.append(
+                    _Heading(
+                        offset=offset,
+                        level=level,
+                        raw_title=raw_title,
+                        canonical_title=canonicalize_heading_text(raw_title),
+                        number=_heading_number(raw_title),
+                    )
+                )
+        offset += len(line)
+
+    # (index into headings, index of the heading that closed its method root)
+    signals: list[tuple[int, int | None]] = []
+    open_signals: list[int] = []
     root_level: int | None = None
     root_number: tuple[int, ...] | None = None
-
-    for line in content.splitlines():
-        heading = _heading_info(line)
-        if heading is None:
-            continue
-        level, raw_title = heading
-        canonical_title = canonicalize_heading_text(raw_title)
-        number = _heading_number(raw_title)
-
+    for index, heading in enumerate(headings):
         if root_level is not None:
             numbered_child = bool(
                 root_number
-                and number
-                and len(number) > len(root_number)
-                and number[: len(root_number)] == root_number
+                and heading.number
+                and len(heading.number) > len(root_number)
+                and heading.number[: len(root_number)] == root_number
             )
-            markdown_child = level > root_level
+            markdown_child = heading.level > root_level
             if numbered_child or markdown_child:
-                if _is_named_method_subsection(canonical_title):
-                    signals.append(canonical_title)
+                if _is_named_method_subsection(heading.canonical_title):
+                    open_signals.append(index)
                 continue
-            if level <= root_level:
+            if heading.level <= root_level:
+                signals.extend((signal, index) for signal in open_signals)
+                open_signals = []
                 root_level = None
                 root_number = None
 
-        if _is_core_method_heading(canonical_title):
-            root_level = level
-            root_number = number
+        if _is_core_method_heading(heading.canonical_title):
+            root_level = heading.level
+            root_number = heading.number
+    signals.extend((signal, None) for signal in open_signals)
 
-    return tuple(dict.fromkeys(signals))
+    occurrences: dict[str, int] = {}
+    spans: list[MethodSubsection] = []
+    for index, root_end_index in signals:
+        subsection = headings[index]
+        last_index = len(headings) if root_end_index is None else root_end_index
+        end = len(content) if root_end_index is None else headings[root_end_index].offset
+        for later in headings[index + 1 : last_index]:
+            if _closes_subsection(subsection, later):
+                end = later.offset
+                break
+        pages: list[int] = []
+        for mark_offset, page in page_marks:
+            if mark_offset < subsection.offset:
+                pages = [page]
+            elif mark_offset < end:
+                pages.append(page)
+            else:
+                break
+        occurrence = occurrences.get(subsection.canonical_title, 0) + 1
+        occurrences[subsection.canonical_title] = occurrence
+        spans.append(
+            MethodSubsection(
+                subsection_id=_subsection_id(subsection.canonical_title, occurrence),
+                canonical_heading=subsection.canonical_title,
+                original_heading=subsection.raw_title,
+                start=subsection.offset,
+                end=end,
+                pages=tuple(dict.fromkeys(pages)),
+            )
+        )
+    return tuple(spans)
+
+
+def _unique_headings(spans: tuple[MethodSubsection, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(span.canonical_heading for span in spans))
+
+
+def detect_methodology_subsections(content: str) -> tuple[str, ...]:
+    return _unique_headings(detect_method_subsection_spans(content))
 
 
 def _is_table_separator(line: str) -> bool:
@@ -486,6 +580,7 @@ def build_ai_processing_view(content: str) -> AIProcessingView:
         warnings.extend(page_warnings)
 
     normalized = "\n".join(output).strip()
+    method_subsection_spans = detect_method_subsection_spans(normalized)
     return AIProcessingView(
         content=normalized,
         included_sections=tuple(dict.fromkeys(included_sections)),
@@ -495,5 +590,6 @@ def build_ai_processing_view(content: str) -> AIProcessingView:
         excluded_figure_text=tuple(dict.fromkeys(excluded_figures)),
         formula_warnings=tuple(dict.fromkeys(formula_warnings)),
         warnings=tuple(dict.fromkeys(warnings)),
-        methodology_subsections=detect_methodology_subsections(normalized),
+        methodology_subsections=_unique_headings(method_subsection_spans),
+        method_subsection_spans=method_subsection_spans,
     )

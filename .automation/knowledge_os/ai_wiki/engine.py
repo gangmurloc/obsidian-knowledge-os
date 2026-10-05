@@ -11,6 +11,7 @@ from typing import Any
 
 from ..io_utils import atomic_write_json, atomic_write_text
 from ..llm import GenerateRequest, LLMProvider, ProviderTimeoutError, request_unload
+from .coverage import build_method_coverage
 from .curator import (
     CURATOR_SELECTION_SCHEMA,
     MAX_FINAL_CONCEPTS,
@@ -611,6 +612,8 @@ def _build_and_apply_plan(
             supporting_chunks=candidate_chunks,
             chunk_sections=chunk_sections,
         )
+        # Kept only for the read-only coverage diagnostics computed after selection.
+        role_candidates = dict(local_candidates)
 
         for identity, concept in sorted(local_candidates.items()):
             primary = " primary_source_entity=true" if concept.is_primary_source_entity else ""
@@ -798,6 +801,37 @@ def _build_and_apply_plan(
             plan.quality_gate_reasons.append(
                 f"{source.relative_path}: {reason}"
             )
+
+        # Diagnostics read the decisions above and never influence them.
+        try:
+            coverage_rows, locatability = build_method_coverage(
+                source_label=source.relative_path,
+                content=processing_view.content,
+                subsections=processing_view.method_subsection_spans,
+                chunks=chunks,
+                heading_chunks={
+                    span.subsection_id: tuple(
+                        chunk.index
+                        for chunk in chunks
+                        if _chunk_methodology_subsections(
+                            chunk_sections[chunk.identifier],
+                            (span.canonical_heading,),
+                        )
+                    )
+                    for span in processing_view.method_subsection_spans
+                },
+                candidates=role_candidates,
+                selected=set(local_candidates),
+                source_title=source.metadata.get("title"),
+            )
+        except Exception as exc:
+            plan.warnings.append(
+                f"{source.relative_path}: method coverage diagnostics failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        else:
+            plan.method_coverage.extend(coverage_rows)
+            plan.evidence_locatability.append(locatability)
 
         plan.processed_sources.append(source.relative_path)
         for identity, concept in local_candidates.items():

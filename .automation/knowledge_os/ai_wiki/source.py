@@ -28,6 +28,8 @@ REQUIRED_SOURCE_PROPERTIES = {
 SUPPORTED_SOURCE_TYPES = {"pdf", "web", "html"}
 DEFAULT_MAX_CHUNK_CHARS = 4_000
 DEFAULT_CHUNK_OVERLAP_CHARS = 200
+BLOCK_SEPARATOR_PATTERN = re.compile(r"\n[ \t]*\n")
+SENTENCE_BREAK_PATTERN = re.compile(r"(?<=[.!?。！？])\s+")
 
 
 def parse_markdown_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -121,23 +123,45 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
-def _split_oversized_block(block: str, max_chars: int) -> list[str]:
-    lines = [line.strip() for line in block.splitlines() if line.strip()]
-    pieces: list[str] = []
-    for line in lines or [block.strip()]:
+def _stripped(text: str, offset: int) -> tuple[str, int]:
+    """Return text.strip() and the offset at which the stripped text starts."""
+    return text.strip(), offset + len(text) - len(text.lstrip())
+
+
+def _split_between(pattern: re.Pattern[str], text: str, offset: int) -> list[tuple[str, int]]:
+    """Like pattern.split(text), with each part paired with its offset."""
+    parts: list[tuple[str, int]] = []
+    position = 0
+    for separator in pattern.finditer(text):
+        parts.append((text[position : separator.start()], offset + position))
+        position = separator.end()
+    parts.append((text[position:], offset + position))
+    return parts
+
+
+def _split_oversized_block(block: str, offset: int, max_chars: int) -> list[tuple[str, int]]:
+    """Split a block into pieces, each paired with its offset in the processing content."""
+    lines: list[tuple[str, int]] = []
+    position = offset
+    for raw_line in block.splitlines(keepends=True):
+        line, line_offset = _stripped(raw_line, position)
+        if line:
+            lines.append((line, line_offset))
+        position += len(raw_line)
+    pieces: list[tuple[str, int]] = []
+    for line, line_offset in lines or [_stripped(block, offset)]:
         if len(line) <= max_chars:
-            pieces.append(line)
+            pieces.append((line, line_offset))
             continue
-        sentences = re.split(r"(?<=[.!?。！？])\s+", line)
-        for sentence in sentences:
-            sentence = sentence.strip()
+        for part, part_offset in _split_between(SENTENCE_BREAK_PATTERN, line, line_offset):
+            sentence, sentence_offset = _stripped(part, part_offset)
             if not sentence:
                 continue
             if len(sentence) <= max_chars:
-                pieces.append(sentence)
+                pieces.append((sentence, sentence_offset))
             else:
                 pieces.extend(
-                    sentence[index : index + max_chars]
+                    (sentence[index : index + max_chars], sentence_offset + index)
                     for index in range(0, len(sentence), max_chars)
                 )
     return pieces
@@ -156,53 +180,61 @@ def chunk_source(
         raise ValueError("overlap_chars must be non-negative and smaller than max_chars")
 
     processing_content = source.content if content is None else content
-    raw_blocks = [block.strip() for block in re.split(r"\n[ \t]*\n", processing_content)]
-    blocks: list[str] = []
-    for block in raw_blocks:
+    # Every block carries its offset so a chunk can report where it sits in the content.
+    blocks: list[tuple[str, int]] = []
+    for part, part_offset in _split_between(BLOCK_SEPARATOR_PATTERN, processing_content, 0):
+        block, block_offset = _stripped(part, part_offset)
         if not block:
             continue
-        blocks.extend(_split_oversized_block(block, max_chars))
+        blocks.extend(_split_oversized_block(block, block_offset, max_chars))
 
-    chunk_texts: list[str] = []
-    current: list[str] = []
+    def joined(parts: list[tuple[str, int]]) -> str:
+        return "\n\n".join(text for text, _offset in parts)
+
+    chunk_parts: list[list[tuple[str, int]]] = []
+    current: list[tuple[str, int]] = []
     current_length = 0
     for block in blocks:
+        block_length = len(block[0])
         separator_length = 2 if current else 0
-        if current and current_length + separator_length + len(block) > max_chars:
-            chunk_texts.append("\n\n".join(current))
-            overlap: list[str] = []
+        if current and current_length + separator_length + block_length > max_chars:
+            chunk_parts.append(current)
+            overlap: list[tuple[str, int]] = []
             overlap_length = 0
             for previous in reversed(current):
-                added = len(previous) + (2 if overlap else 0)
+                added = len(previous[0]) + (2 if overlap else 0)
                 if overlap_length + added > overlap_chars:
                     break
                 overlap.insert(0, previous)
                 overlap_length += added
             current = overlap
-            current_length = len("\n\n".join(current))
-            if current and current_length + 2 + len(block) > max_chars:
+            current_length = len(joined(current))
+            if current and current_length + 2 + block_length > max_chars:
                 current = []
                 current_length = 0
         if current:
             current_length += 2
         current.append(block)
-        current_length += len(block)
+        current_length += block_length
     if current:
-        text = "\n\n".join(current)
-        if not chunk_texts or text != chunk_texts[-1]:
-            chunk_texts.append(text)
+        if not chunk_parts or joined(current) != joined(chunk_parts[-1]):
+            chunk_parts.append(current)
 
     chunks: list[SourceChunk] = []
-    for index, text in enumerate(chunk_texts, start=1):
+    for index, parts in enumerate(chunk_parts, start=1):
+        text = joined(parts)
         digest = hashlib.sha256(
             f"{source.content_hash}:{index}:{text}".encode("utf-8")
         ).hexdigest()[:16]
+        last_text, last_offset = parts[-1]
         chunks.append(
             SourceChunk(
                 source=source,
                 index=index,
                 identifier=f"chunk-{index:04d}-{digest}",
                 text=text,
+                start=parts[0][1],
+                end=last_offset + len(last_text),
             )
         )
     return chunks

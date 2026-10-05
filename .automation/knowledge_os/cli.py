@@ -289,6 +289,8 @@ def _print_ai_wiki_plan(
         ("curator_trigger_reason", plan.curator_trigger_reason),
         ("selected_representatives", plan.selected_representatives),
         ("dropped_aliases", plan.dropped_aliases),
+        ("method_coverage", plan.method_coverage),
+        ("evidence_locatability", plan.evidence_locatability),
     ):
         print(f"{label}:")
         for value in values:

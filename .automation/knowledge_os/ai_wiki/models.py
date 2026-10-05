@@ -45,6 +45,9 @@ class SourceChunk:
     index: int
     identifier: str
     text: str
+    # Half-open character range of this chunk in the content it was built from.
+    start: int | None = None
+    end: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,8 @@ class ProcessingPlan:
     selected_representatives: list[str] = field(default_factory=list)
     dropped_aliases: list[str] = field(default_factory=list)
     methodology_subsections: list[str] = field(default_factory=list)
+    method_coverage: list[str] = field(default_factory=list)
+    evidence_locatability: list[str] = field(default_factory=list)
     quality_gate_status: str = "pass"
     quality_gate_reasons: list[str] = field(default_factory=list)
     write_blocked: bool = False
