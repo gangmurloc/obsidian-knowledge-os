@@ -78,8 +78,8 @@ remote: origin https://github.com/gangmurloc/obsidian-knowledge-os (public)
 stable tag: ai-wiki-v1 (Complete AI Wiki v1 end-to-end pipeline)
 ```
 
-- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋.
-- Stage 3까지 모두 커밋됐다. 미커밋 변경은 없다.
+- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋 → `Add saved plans that can be reviewed and applied without a model call` → plan 문서 커밋.
+- Plan 저장·적용 기능까지 모두 커밋됐다. 미커밋 변경은 없다.
 - 2026-10-04에 공개 저장소로 올리면서 `30_Resources/Sources/`를 모든 커밋에서 제거했다. 논문 전문을 공개 재배포하지 않기 위해서다. 그래서 그 전에 문서나 프롬프트에 적어 둔 커밋 해시(`110bd8e`, `cd892c2`, `9f350e0`, `4951c90` 등)는 더 이상 유효하지 않다. 해시는 `git log --oneline`으로 확인한다.
 - Source 노트는 이제 git이 추적하지 않는다(`.gitignore`). 파일은 vault에 그대로 있고 Google Drive로만 보존된다.
 - 기록을 다시 쓰기 전의 전체 저장소는 `C:\Users\GIL\obsidian-knowledge-os-backup-20261004\vault-before-publish.bundle`에 백업돼 있다.
@@ -263,6 +263,18 @@ Source Markdown
 - 일반 추출 로직(호출, JSON repair, 진단 파일)을 `_extract_concepts`로 옮겨 일반 추출과 targeted 추출이 함께 쓴다. 동작은 같다.
 - 형식 설명은 `.automation/README.md`의 "Method Subsection Recovery" 절에 있다.
 
+### 14. Plan 저장과 적용: 검토한 그대로 쓰기
+
+- 문제: dry-run report에는 note 제목만 나오고, `scan --write`는 모델을 다시 호출하므로 검토한 dry-run과 실제로 쓰이는 note가 다를 수 있다.
+- `ai-wiki scan ... --save-plan`은 dry-run 결과를 `.automation/state/plans/`에 저장한다. Plan 파일(`<시각>_<범위>.json`)과 검토용 사본(`<시각>_<범위>.review.md`) 두 개가 생긴다. 검토용 사본에는 쓰일 note 전문과 evidence가 들어 있다.
+- `--save-plan`은 `--write`와 함께 쓸 수 없다. Technical failure가 있거나 quality gate가 실패했거나 처리된 Source가 없으면 저장하지 않는다.
+- `ai-wiki apply --plan <파일>`은 plan을 검증하고 note를 출력한다. `--write`를 붙이면 note와 processing state를 쓴다. 어느 쪽도 LLM을 호출하지 않는다.
+- 적용 전 검사: plan이 저장 뒤 수정되지 않았는지(digest), processing view version이 같은지, Source와 그 processing state 항목이 그대로인지, 대상이 `30_Resources/AI-Wiki/` 바로 아래의 note인지, create 대상이 아직 없는지, update 대상이 plan을 만들 때의 내용과 같은 AI 소유 note인지 확인한다. 하나라도 어긋나면 exit 5로 끝나고 아무것도 쓰지 않는다.
+- Plan은 한 번만 적용할 수 있다. 검토용 사본을 고쳐도 적용 내용은 바뀌지 않고, JSON을 고치면 plan이 무효가 된다.
+- `.automation/state/`는 git이 추적하지 않으므로 plan과 검토용 사본은 로컬에만 남는다.
+- 콘솔 code page로 표현할 수 없는 글자가 나와도 report 출력이 중단되지 않도록 CLI 출력에 escape 처리를 넣었다.
+- 사용법은 `.automation/README.md`의 "Review a Plan, Then Apply It" 절에 있다.
+
 ## 핵심 코드 지도
 
 - `.automation/run.py`: CLI entrypoint
@@ -280,7 +292,8 @@ Source Markdown
 - `.automation/knowledge_os/ai_wiki/ontology.py`: identity와 relation suggestions
 - `.automation/knowledge_os/ai_wiki/curator.py`: duplicate risk와 source-level selection
 - `.automation/knowledge_os/ai_wiki/quality.py`: semantic quality gate
-- `.automation/knowledge_os/ai_wiki/coverage.py`: evidence 위치 찾기와 method coverage 진단 (읽기 전용)
+- `.automation/knowledge_os/ai_wiki/coverage.py`: evidence 위치 찾기, targeted 추출 대상 선정, method coverage 진단
+- `.automation/knowledge_os/ai_wiki/plan_file.py`: plan 저장, 검증, 적용
 - `.automation/knowledge_os/ai_wiki/engine.py`: end-to-end orchestration
 - `.automation/knowledge_os/ai_wiki/render.py`: AI-Wiki Markdown rendering
 - `.automation/tests/test_ai_wiki.py`: extraction/selection/write safety tests
@@ -289,14 +302,15 @@ Source Markdown
 - `.automation/tests/test_llm_unload.py`: `ai-wiki scan`·`llm-test` 실행 종료 시 unload와 exit code tests
 - `.automation/tests/test_method_coverage.py`: subsection span, chunk offset, excerpt 위치, coverage report tests
 - `.automation/tests/test_method_recovery.py`: targeted extraction 대상 선정, 상한, 실패 처리, provenance tests
+- `.automation/tests/test_plan_apply.py`: plan 저장, 검증 거부 조건, 적용 tests
 
 ## 최신 테스트 상태
 
-2026-10-06 기준 (Stage 3 반영 후):
+2026-10-06 기준 (plan 저장·적용 반영 후):
 
 ```text
 python -m unittest discover -s .automation/tests
-Ran 221 tests in 12.845s
+Ran 235 tests in 13.427s
 OK
 ```
 
@@ -455,6 +469,24 @@ Retrieve Relative Memory
 - 실행 시간은 8분 36초였다(호출 17회).
 - `--write`는 하지 않았다. Dry-run report에는 note 본문과 evidence가 나오지 않아 수동 검토를 할 수 없다.
 
+### 저장된 plan과 note 검토 (2026-10-06, `qwen3.5:27b`)
+
+`--save-plan`으로 다시 실행해 plan을 저장했다. 통계와 선택 결과는 Stage 3 실행과 같다(`llm_calls: 17`, 선택 5개, gate pass).
+
+```text
+plan:   .automation/state/plans/20261005T152047Z_A-MEM.json
+review: .automation/state/plans/20261005T152047Z_A-MEM.review.md
+```
+
+`ai-wiki apply --plan`을 `--write` 없이 실행해 검증이 통과하는 것을 확인했다. 아직 적용하지 않았다.
+
+Claude Code가 검토용 사본을 읽고 확인한 것(Source 원문과 대조한 것은 아니다):
+
+- `Autonomous Link Generation Mechanism`, `Memory Note`, `Retrieve Relative Memory`는 evidence 3개가 모두 해당 subsection의 targeted chunk에서 나왔고, 정의·mechanism·evidence가 서로 맞는다.
+- `Agentic Memory`는 evidence 3개가 모두 chunk 1에서 나왔고 내용이 일관된다.
+- `Memory Evolution Mechanism`은 evidence 3개가 모두 chunk 12(부록)에서 나왔다. 그중 2개는 부록의 prompt template 문장이고 1개는 시각화 결과 문장이다. 3.3절 본문에 근거를 둔 후보(`Memory Evolution`)는 같은 duplicate-risk group의 alias로 탈락했다. 이 note는 사람이 특히 확인해야 한다.
+- `Retrieve Relative Memory`는 제목이 heading 그대로다. 내용은 query embedding과 cosine similarity로 상위 k개를 찾는 과정을 설명한다.
+
 ### `qwen3.5:4b` 결과 (Stage S 이전, 참고용)
 
 사용자가 실행한 명령:
@@ -537,12 +569,13 @@ Curator는 기존 candidate만 선택할 수 있으므로 누락된 mechanism을
 
 이 절의 targeted extraction은 Stage 3으로 구현됐다("지금까지의 진행 과정" 13번). 아래 설계 원칙과 그 뒤의 "Claude Code용 목표 프롬프트"는 구현의 근거로 남겨 둔 기록이다. 남은 작업은 다음과 같다.
 
-1. **첫 `--write` 전 수동 검토 수단.** Dry-run report에는 note 본문과 evidence가 나오지 않는다. 선택된 concept의 본문과 evidence를 쓰기 전에 볼 방법이 필요하다.
-2. **Quality gate의 cover 정의(F1).** Gate는 제목이 heading과 일치해야 cover로 본다. Targeted 추출로 복구한 후보는 제목이 달라도 그 subsection에서 나온 것이 분명하므로, gate가 evidence나 provenance 기준 cover도 인정할지 결정해야 한다. Gate를 바꾸는 일이라 설계 검토가 필요하다.
-3. **Role 승격의 heading 줄 의존(F2).** `_apply_source_context_roles`는 후보를 뽑은 chunk에 heading 줄이 있어야 method_entity를 mechanism으로 올린다. Subsection 본문이 다음 chunk로 이어지면 승격되지 않는다. Offset 기준으로 바꿀 수 있다.
-4. **Method root 감지 확장(F3).** `Our Approach`, `Proposed Method`, `Framework`, 시스템 이름 섹션은 method root로 감지되지 않는다. 이런 Source에서는 복구와 coverage 검사가 둘 다 조용히 꺼진다.
-5. **다른 논문으로 검증.** 지금까지 실제 실행은 A-MEM 한 편뿐이다. 구조가 다른 논문 2~3편으로 dry-run해 과적합 여부를 확인한다.
-6. **실행 간 변동.** `temperature=0`이어도 실행마다 후보가 조금 달라진다. 비교 실험을 하려면 seed 고정을 검토한다.
+1. **첫 적용.** 검토 수단은 plan 저장·적용으로 구현됐다(14번). 사용자가 검토용 사본을 읽고, 받아들일 만하면 `ai-wiki apply --plan ... --write`를 실행한다. 저장된 A-MEM plan에서는 `Memory Evolution Mechanism`의 evidence가 부록에서 나온 점을 확인해야 한다.
+2. **Duplicate-risk group의 대표 선택.** Curator가 같은 group에서 method 절에 근거를 둔 후보 대신 부록에 근거를 둔 후보를 대표로 골랐다. Curator에게 후보별 evidence 위치(해당 method subsection 안인지)를 알려 줄지 검토한다. Curator prompt를 바꾸는 일이라 설계 검토가 필요하다.
+3. **Quality gate의 cover 정의(F1).** Gate는 제목이 heading과 일치해야 cover로 본다. Targeted 추출로 복구한 후보는 제목이 달라도 그 subsection에서 나온 것이 분명하므로, gate가 evidence나 provenance 기준 cover도 인정할지 결정해야 한다. Gate를 바꾸는 일이라 설계 검토가 필요하다.
+4. **Role 승격의 heading 줄 의존(F2).** `_apply_source_context_roles`는 후보를 뽑은 chunk에 heading 줄이 있어야 method_entity를 mechanism으로 올린다. Subsection 본문이 다음 chunk로 이어지면 승격되지 않는다. Offset 기준으로 바꿀 수 있다.
+5. **Method root 감지 확장(F3).** `Our Approach`, `Proposed Method`, `Framework`, 시스템 이름 섹션은 method root로 감지되지 않는다. 이런 Source에서는 복구와 coverage 검사가 둘 다 조용히 꺼진다.
+6. **다른 논문으로 검증.** 지금까지 실제 실행은 A-MEM 한 편뿐이다. 구조가 다른 논문 2~3편으로 dry-run해 과적합 여부를 확인한다.
+7. **실행 간 변동.** `temperature=0`이어도 실행마다 후보가 조금 달라진다. 비교 실험을 하려면 seed 고정을 검토한다.
 
 일반 chunk extraction은 유지하되, 명시적인 core-method subsection 중 아직 mechanism/component candidate로 cover되지 않은 subsection만 대상으로 bounded targeted extraction을 추가한다.
 
@@ -656,7 +689,7 @@ G:\내 드라이브\Obsidian\GILVault\GIL
 현재 상태:
 - PDF ingestion, processing view, Local Ollama structured extraction, deterministic identity deduplication, source-level curator, semantic quality gate가 구현되어 있다.
 - 현재 uncommitted changes를 되돌리거나 덮어쓰지 마라.
-- 전체 unit test 221개가 통과한다.
+- 전체 unit test 235개가 통과한다.
 - 실제 A-MEM dry-run에서 methodology subsection 4개는 정확히 감지했지만 general extraction이 named mechanism 후보를 만들지 못해 quality_gate가 failed 되었다.
 - curator는 선택 전용이므로 누락 후보를 생성할 수 없다.
 
@@ -724,7 +757,7 @@ Dry-run report 추가:
 ## Claude Code 첫 실행 체크리스트
 
 1. `git status --short`로 미커밋 변경이 있는지 확인한다.
-2. 현재 tests를 먼저 실행해 baseline 221 tests 통과를 확인한다.
+2. 현재 tests를 먼저 실행해 baseline 235 tests 통과를 확인한다.
 3. 실제 Source와 AI-Wiki 파일을 수정하지 않는다.
 4. `preprocess.py`가 subsection body/provenance를 제공할 수 있도록 최소 확장한다.
 5. 기존 general extraction, curator, quality gate를 재사용한다.
@@ -740,10 +773,22 @@ python -m unittest discover -s ".automation\tests" -v
 git diff --check
 ```
 
-사용자가 실행할 다음 실제 검증 명령:
+사용자가 실행할 다음 명령. 먼저 검토용 사본을 읽는다.
+
+```text
+.automation\state\plans\20261005T152047Z_A-MEM.review.md
+```
+
+받아들일 만하면 저장된 plan을 그대로 적용한다. LLM을 호출하지 않으므로 터널이 없어도 된다.
 
 ```powershell
-python ".automation\run.py" ai-wiki scan --source "A-MEM.md"
+python ".automation\run.py" ai-wiki apply --plan ".automation\state\plans\20261005T152047Z_A-MEM.json" --write
+```
+
+받아들일 수 없으면 적용하지 않고 새 plan을 만든다.
+
+```powershell
+python ".automation\run.py" ai-wiki scan --source "A-MEM.md" --save-plan
 ```
 
 Quality gate가 `pass`이고 selected concepts와 evidence가 수동 검토를 통과하기 전에는 `--write`를 사용하지 않는다.

@@ -364,7 +364,7 @@ Distinct candidates with conservative title overlap remain separate. The dry-run
 
 ### Dry-Run Commands
 
-Dry-run is the default and writes neither AI-Wiki notes nor processing state. A JSON syntax failure is the sole exception: it writes a diagnostic artifact under `.automation/state/diagnostics/` so the malformed local response can be inspected.
+Dry-run is the default and writes neither AI-Wiki notes nor processing state. Two things can still write under `.automation/state/`, which is local and not tracked by git: a JSON syntax failure writes a diagnostic artifact under `.automation/state/diagnostics/` so the malformed local response can be inspected, and the explicit `--save-plan` flag writes a plan under `.automation/state/plans/`.
 
 ```powershell
 python ".automation\run.py" ai-wiki scan --source "attention_is_all_you_need.md"
@@ -376,9 +376,25 @@ python ".automation\run.py" ai-wiki scan --changed
 
 The plan reports processed and skipped Sources, new concepts, updates with `supports`, `extends`, or `contradicts` relation, unchanged concepts, non-writing ontology relation suggestions, removed Sources, warnings, and failures. Processing diagnostics list included and excluded sections, named methodology subsections, included block count, excluded tables, excluded figure text, formula warnings, Source and processing character counts, and chunk count. Concept-selection diagnostics list all candidates, selected and dropped concepts, duplicate-risk groups, curator trigger reasons, selected representatives, dropped aliases, curator call count, and quality-gate status. The report starts with an `llm` block showing `endpoint`, `model`, `keep_alive`, and `unload_after_run`, and `statistics` lists `unload_requests` separately from `llm_calls`. An unchanged Source still receives local preprocessing diagnostics but does not call the LLM. Removed Sources are report-only and never cause AI-Wiki deletion.
 
+### Review a Plan, Then Apply It
+
+The dry-run report lists planned notes by title only, and a later `scan --write` calls the model again, so the notes it writes can differ from the dry-run that was reviewed. To write exactly what was reviewed, save the dry-run as a plan and apply that plan:
+
+```powershell
+python ".automation\run.py" ai-wiki scan --source "example.md" --save-plan
+python ".automation\run.py" ai-wiki apply --plan ".automation\state\plans\<plan>.json"
+python ".automation\run.py" ai-wiki apply --plan ".automation\state\plans\<plan>.json" --write
+```
+
+- `--save-plan` runs a normal dry-run and then writes two files under `.automation/state/plans/`: the plan (`<timestamp>_<scope>.json`) and a read-only review copy (`<timestamp>_<scope>.review.md`) that shows every planned note in full, including its evidence. It cannot be combined with `--write`. Nothing is saved when the run has a technical failure, fails the quality gate, or processed no Source.
+- `apply` without `--write` validates the plan and prints the notes. `apply --write` writes them and updates the processing state. Neither form calls the model.
+- The plan holds the rendered notes, the processing-state update, the SHA-256 of each Source, and a digest of its own contents. `apply` uses only the JSON file; editing the review copy has no effect, and editing the JSON makes the plan invalid.
+- Before writing anything, `apply` checks that the plan is unmodified, that it was made with the current processing view version, that every Source and its processing-state entry are unchanged, that every target is a note directly under `30_Resources/AI-Wiki/`, that a note to create does not exist yet, and that a note to update is still an AI-owned note with exactly the text the plan was computed against. Any failed check exits with code `5` and writes nothing.
+- A plan can therefore be applied once. After that, or after the Source or a target note changes, run the scan again.
+
 ### Explicit Write
 
-Add `--write` only after reviewing the dry-run:
+`scan --write` plans and writes in one run, without a saved plan. Add `--write` only after reviewing the dry-run:
 
 ```powershell
 python ".automation\run.py" ai-wiki scan --source "attention_is_all_you_need.md" --write

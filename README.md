@@ -92,8 +92,12 @@ Check the model, then build wiki notes from a Source:
 python ".automation\run.py" llm-status
 python ".automation\run.py" llm-test
 python ".automation\run.py" ai-wiki scan --source "example.md"                # dry run
-python ".automation\run.py" ai-wiki scan --source "example.md" --write
+python ".automation\run.py" ai-wiki scan --source "example.md" --save-plan    # dry run, saved for review
+python ".automation\run.py" ai-wiki apply --plan ".automation\state\plans\<plan>.json"           # print the notes
+python ".automation\run.py" ai-wiki apply --plan ".automation\state\plans\<plan>.json" --write   # write exactly those notes
 ```
+
+`scan --write` also exists; it plans and writes in one run, calling the model again.
 
 Exit codes: `0` success, `2` ingestion or unexpected error, `3` OCR required, `4` LLM error, `5` AI-Wiki technical failure, `6` quality-gate failure.
 
