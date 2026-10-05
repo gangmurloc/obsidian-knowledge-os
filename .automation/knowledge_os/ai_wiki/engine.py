@@ -13,7 +13,12 @@ from typing import Any
 
 from ..io_utils import atomic_write_json, atomic_write_text
 from ..llm import GenerateRequest, LLMProvider, ProviderTimeoutError, request_unload
-from .coverage import COVER_ROLES, build_method_coverage, uncovered_method_subsections
+from .coverage import (
+    COVER_ROLES,
+    build_method_coverage,
+    method_subsection_evidence,
+    uncovered_method_subsections,
+)
 from .curator import (
     CURATOR_SELECTION_SCHEMA,
     MAX_FINAL_CONCEPTS,
@@ -933,6 +938,12 @@ def _build_and_apply_plan(
                 local_candidates,
                 supporting_chunks=candidate_chunks,
                 chunk_sections=chunk_sections,
+                method_subsection_evidence=method_subsection_evidence(
+                    content=processing_view.content,
+                    subsections=processing_view.method_subsection_spans,
+                    chunks=[*chunks, *targeted_chunks],
+                    candidates=local_candidates,
+                ),
             )
             curator_system, curator_prompt = build_curator_prompt(
                 curator_candidates,

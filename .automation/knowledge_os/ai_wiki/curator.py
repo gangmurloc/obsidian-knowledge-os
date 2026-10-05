@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -67,6 +68,8 @@ class CuratorCandidate:
     evidence_count: int
     role: str = "core_concept"
     is_primary_source_entity: bool = False
+    # Named method subsections whose text contains evidence located for this candidate.
+    method_subsection_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -245,7 +248,9 @@ def build_curator_candidates(
     *,
     supporting_chunks: dict[str, set[str]],
     chunk_sections: dict[str, tuple[str, ...]],
+    method_subsection_evidence: Mapping[str, Sequence[str]] | None = None,
 ) -> list[CuratorCandidate]:
+    method_evidence = method_subsection_evidence or {}
     candidates: list[CuratorCandidate] = []
     for identity, concept in sorted(concepts.items()):
         chunk_ids = tuple(sorted(supporting_chunks.get(identity, set())))
@@ -270,6 +275,7 @@ def build_curator_candidates(
                 source_sections=sections,
                 evidence_count=len(concept.evidence),
                 is_primary_source_entity=concept.is_primary_source_entity,
+                method_subsection_evidence=tuple(method_evidence.get(identity, ())),
             )
         )
     return candidates
@@ -292,6 +298,7 @@ def build_curator_prompt(
             "source_sections": list(candidate.source_sections),
             "evidence_count": candidate.evidence_count,
             "is_primary_source_entity": candidate.is_primary_source_entity,
+            "method_subsection_evidence": list(candidate.method_subsection_evidence),
         }
         for candidate in candidates
     ]
@@ -338,6 +345,7 @@ Rules:
 - Prefer roles core_concept, mechanism, and component. Treat method_entity conservatively and normally exclude dataset, metric, baseline, and analysis.
 - Select at most one candidate marked is_primary_source_entity.
 - Named methodology subsections are weak supervision only. Prefer an existing mechanism/component candidate when its content and supporting sections align with one; never create a missing candidate from a heading.
+- method_subsection_evidence lists the named methodology subsections whose text contains that candidate's evidence. Within a duplicate-risk group, prefer the candidate whose evidence lies in a methodology subsection over one supported only by other sections such as an appendix, experiments, or related work.
 - Do not modify candidate content.
 - Give one brief selection reason per selected identity.
 - Return no Markdown and no text outside the JSON object.

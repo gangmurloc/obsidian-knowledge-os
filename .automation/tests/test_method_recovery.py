@@ -398,6 +398,72 @@ class MethodRecoveryTests(MethodCoverageTestCase):
         self.assertEqual(len(provider.requests), 1)
 
 
+class CuratorEvidenceSignalTests(MethodCoverageTestCase):
+    def _curator_candidates(self, prompt: str) -> dict[str, dict]:
+        block = prompt.split("Candidates:\n", 1)[1].split("\n\nDeterministic duplicate-risk groups", 1)[0]
+        return {item["title"]: item for item in json.loads(block)}
+
+    def test_curator_sees_which_candidates_have_evidence_in_a_method_subsection(self):
+        self._source(METHOD_BODY)
+        plan, provider = self._run(
+            (
+                response(concept("State Construction", excerpts=(P1_LEAD,))),
+                response(),
+                response(concept("Dynamic Routing", excerpts=(Q1_LEAD,))),
+                response(concept("Dynamic Routing Mechanism", excerpts=(E1_LEAD,))),
+                curator_response("State Construction", "Dynamic Routing"),
+            )
+        )
+        curator_prompt = provider.requests[-1].prompt
+        candidates = self._curator_candidates(curator_prompt)
+
+        self.assertEqual(plan.stats.recovery_calls, 0)
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertIn("duplicate-risk group", plan.curator_trigger_reason[0])
+        self.assertEqual(
+            candidates["State Construction"]["method_subsection_evidence"],
+            ["state construction"],
+        )
+        self.assertEqual(
+            candidates["Dynamic Routing"]["method_subsection_evidence"],
+            ["dynamic routing"],
+        )
+        self.assertEqual(candidates["Dynamic Routing Mechanism"]["method_subsection_evidence"], [])
+        self.assertIn(
+            "prefer the candidate whose evidence lies in a methodology subsection",
+            curator_prompt,
+        )
+        for text in (P1_LEAD, Q1_LEAD, E1_LEAD):
+            self.assertNotIn(text, curator_prompt)
+
+    def test_evidence_from_a_targeted_call_is_attributed_to_its_subsection(self):
+        self._source(METHOD_BODY)
+        plan, provider = self._run(
+            (
+                # A core_concept does not cover a subsection, so both get a targeted call.
+                response(
+                    concept("State Construction Mechanism", role="core_concept", excerpts=(E1_LEAD,))
+                ),
+                response(concept("State Construction", excerpts=(P2_LEAD,))),
+                response(concept("Dynamic Routing", excerpts=(Q1_LEAD,))),
+                curator_response("State Construction", "Dynamic Routing"),
+            ),
+            max_chunk_chars=4_000,
+        )
+        candidates = self._curator_candidates(provider.requests[-1].prompt)
+
+        self.assertEqual(plan.stats.recovery_calls, 2)
+        self.assertEqual(plan.stats.curator_calls, 1)
+        self.assertEqual(
+            {title: item["method_subsection_evidence"] for title, item in candidates.items()},
+            {
+                "Dynamic Routing": ["dynamic routing"],
+                "State Construction": ["state construction"],
+                "State Construction Mechanism": [],
+            },
+        )
+
+
 class TargetedPromptTests(unittest.TestCase):
     def test_prompt_states_the_subsection_rules_and_embeds_only_the_chunk(self):
         chunk = chunk_source(source_note(METHOD_BODY), content="##### 3.1 State Construction\n\nBody text.")[0]

@@ -191,6 +191,29 @@ def uncovered_method_subsections(
     ]
 
 
+def method_subsection_evidence(
+    *,
+    content: str,
+    subsections: Sequence[MethodSubsection],
+    chunks: Sequence[SourceChunk],
+    candidates: Mapping[str, Concept],
+) -> dict[str, tuple[str, ...]]:
+    """For each candidate, the method subsections whose span holds its located evidence."""
+    if not subsections:
+        return {}
+    evidence_starts = _located_evidence_starts(content, chunks, candidates)
+    return {
+        identity: tuple(
+            dict.fromkeys(
+                subsection.canonical_heading
+                for subsection in subsections
+                if _evidence_in_span(subsection, starts)
+            )
+        )
+        for identity, starts in evidence_starts.items()
+    }
+
+
 def _numbers(values: Sequence[int]) -> str:
     return ",".join(str(value) for value in values) or "-"
 
