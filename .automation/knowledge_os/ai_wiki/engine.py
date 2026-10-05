@@ -1077,6 +1077,7 @@ def _build_and_apply_plan(
                 merge_concepts(candidates[identity], concept)
             else:
                 candidates[identity] = concept
+        plan.previous_state[source.relative_path] = copy.deepcopy(previous)
         plan.state_updates[source.relative_path] = {
             "sha256": source.content_hash,
             "processing_view_version": AI_PROCESSING_VIEW_VERSION,
@@ -1191,7 +1192,14 @@ def _build_and_apply_plan(
                 existing_metadata=existing.metadata,
             )
             plan.changes.append(
-                PlannedChange("update", concept.title, path, relation, content)
+                PlannedChange(
+                    "update",
+                    concept.title,
+                    path,
+                    relation,
+                    content,
+                    hashlib.sha256(existing.original_text.encode("utf-8")).hexdigest(),
+                )
             )
 
     if write and (plan.failures or plan.quality_gate_status == "failed"):

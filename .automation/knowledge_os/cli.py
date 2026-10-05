@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from typing import Sequence
 
 from .ai_wiki import AIWikiError, ScanScope, process_ai_wiki
+from .ai_wiki.plan_file import apply_plan, plan_block_reason, review_path, save_plan
 from .llm import (
     GenerateRequest,
     LLMConfig,
@@ -121,15 +123,39 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Scan new and changed Sources across Papers and Web.",
     )
-    scan.add_argument(
+    scan_mode = scan.add_mutually_exclusive_group()
+    scan_mode.add_argument(
         "--write",
         action="store_true",
         help="Atomically apply the plan to AI-Wiki and processing state.",
+    )
+    scan_mode.add_argument(
+        "--save-plan",
+        action="store_true",
+        help=(
+            "Save this dry-run under .automation/state/plans/ so `ai-wiki apply` can "
+            "write exactly these notes later without calling the model again."
+        ),
     )
     scan.add_argument(
         "--config",
         type=Path,
         help="Config path relative to the Vault, or an absolute path.",
+    )
+    apply = ai_wiki_commands.add_parser(
+        "apply",
+        help="Review or write a plan saved by `ai-wiki scan --save-plan`; makes no LLM call.",
+    )
+    apply.add_argument(
+        "--plan",
+        type=Path,
+        required=True,
+        help="Plan file relative to the Vault, or an absolute path.",
+    )
+    apply.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the plan's notes and processing state. Without this flag it only validates and prints.",
     )
     return parser
 
@@ -341,11 +367,12 @@ def _run_ai_wiki_scan(args: argparse.Namespace) -> int:
     config, provider, _config_path = _load_local_provider(args.vault, args.config)
     if not config.model:
         raise AIWikiError("Local LLM model is not configured.")
+    scope = _scan_scope(args)
     plan = process_ai_wiki(
         vault_root=args.vault,
         provider=provider,
         model_name=config.model,
-        scope=_scan_scope(args),
+        scope=scope,
         write=args.write,
         unload_after_run=config.unload_after_run,
     )
@@ -356,9 +383,50 @@ def _run_ai_wiki_scan(args: argparse.Namespace) -> int:
         config=config,
         endpoint=provider.endpoint,
     )
+    if args.save_plan:
+        reason = plan_block_reason(plan)
+        if reason is not None:
+            print(f"plan_saved: (not saved because of {reason})")
+        else:
+            saved = save_plan(
+                plan,
+                vault_root=args.vault,
+                scope=scope,
+                provider_name=provider.name,
+                model_name=config.model,
+            )
+            root = args.vault.resolve()
+            print(f"plan_saved: {saved.relative_to(root).as_posix()}")
+            print(f"plan_review: {review_path(saved).relative_to(root).as_posix()}")
     if plan.failures:
         return 5
     return 6 if plan.quality_gate_status == "failed" else 0
+
+
+def _run_ai_wiki_apply(args: argparse.Namespace) -> int:
+    loaded = apply_plan(vault_root=args.vault, plan_path=args.plan, write=args.write)
+    print(f"mode: {'write' if args.write else 'dry-run'}")
+    print(f"plan: {loaded.relative_path}")
+    print(f"created_at: {loaded.created_at}")
+    print(f"model: {loaded.model}")
+    print("sources:")
+    for source in loaded.sources:
+        print(f"  - {source}")
+    print("changes:")
+    for change in loaded.changes:
+        relation = f" ({change.relation})" if change.relation else ""
+        print(f"  - {change.action}: {change.title}{relation}: {change.relative_path}")
+    if not loaded.changes:
+        print("  (none)")
+    if args.write:
+        print(f"status: applied; wrote {len(loaded.changes)} note(s) and the processing state")
+        return 0
+    for change in loaded.changes:
+        print(f"----- {change.action}: {change.relative_path} -----")
+        print(change.content.rstrip("\n"))
+    print("-----")
+    print("status: valid; nothing was written. Add --write to apply this plan.")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -368,6 +436,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s: %(message)s",
     )
+    # A console code page such as cp949 cannot encode every character found in
+    # extracted text; escape those characters instead of failing mid-report.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
 
     try:
         if args.command == "ingest-paper":
@@ -388,6 +461,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt=args.prompt,
             )
         elif args.command == "ai-wiki":
+            if args.ai_wiki_command == "apply":
+                return _run_ai_wiki_apply(args)
             return _run_ai_wiki_scan(args)
         else:  # pragma: no cover - argparse enforces the available commands.
             parser.error(f"Unknown command: {args.command}")

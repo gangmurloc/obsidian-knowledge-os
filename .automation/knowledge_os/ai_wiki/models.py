@@ -90,6 +90,8 @@ class PlannedChange:
     path: Path
     relation: str | None
     content: str | None
+    # For an update, the SHA-256 of the note text the new content was computed against.
+    base_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,8 @@ class ProcessingPlan:
     quality_gate_reasons: list[str] = field(default_factory=list)
     write_blocked: bool = False
     state_updates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # State entry each processed Source had before this run; None when it had none.
+    previous_state: dict[str, Any] = field(default_factory=dict)
     stats: ProcessingStats = field(default_factory=ProcessingStats)
 
     @property
