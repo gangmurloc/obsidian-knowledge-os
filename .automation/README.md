@@ -273,7 +273,7 @@ The processor reads normalized Markdown only. It does not reopen PDF or HTML ori
 
 Malformed tables, excessive numeric-density rows, raw picture/OCR text, probable joined-word OCR blocks, flattened formulas, and a missing formula after an explicit formula-introducing sentence become page-linked omission markers. These markers tell the LLM not to reconstruct missing content. Filtering never writes the processing view back to the Source Markdown.
 
-It never writes Sources, Knowledge, Projects, Areas, Ideas, Decisions, or notes with `origin: me`. It never assigns `understood`, `applied`, or `human_verified: true`.
+It never writes Sources, Knowledge, Projects, Areas, Ideas, Decisions, or notes with `origin: me`. It never assigns `understood` or `applied`. Scan and apply never assign `human_verified: true`; only the explicit `ai-wiki verify --write` step does, as described under "Verify Notes".
 
 Each AI-Wiki note uses `origin: ai`, `knowledge_status: processed`, `human_verified: false`, a `sources` Wikilink list, visible `## Sources`, and visible `## Provenance`. Existing valid provenance is retained when another Source supports or extends a concept.
 
@@ -391,6 +391,21 @@ python ".automation\run.py" ai-wiki apply --plan ".automation\state\plans\<plan>
 - The plan holds the rendered notes, the processing-state update, the SHA-256 of each Source, and a digest of its own contents. `apply` uses only the JSON file; editing the review copy has no effect, and editing the JSON makes the plan invalid.
 - Before writing anything, `apply` checks that the plan is unmodified, that it was made with the current processing view version, that every Source and its processing-state entry are unchanged, that every target is a note directly under `30_Resources/AI-Wiki/`, that a note to create does not exist yet, and that a note to update is still an AI-owned note with exactly the text the plan was computed against. Any failed check exits with code `5` and writes nothing.
 - A plan can therefore be applied once. After that, or after the Source or a target note changes, run the scan again.
+
+### Verify Notes
+
+`ai-wiki verify` checks AI-Wiki notes against their Sources and, when asked, records a review:
+
+```powershell
+python ".automation\run.py" ai-wiki verify --note "Example Concept.md"
+python ".automation\run.py" ai-wiki verify --note "Example Concept.md" --write --reviewer "<reviewer name>"
+```
+
+- Without `--write` it only reports. For each note it prints the cited Sources and how many evidence excerpts are found verbatim in the Source's processing view, using the same exact matching as the coverage diagnostics. An excerpt that is not found is not necessarily wrong: formula symbols, page markers, and joined words from PDF extraction prevent an exact match.
+- With `--write` it sets `human_verified: true`, adds `verified_by: ai`, and appends one `Verification` line under `## Provenance` with the reviewer name, the date, and the excerpt count. Nothing else in the note changes. `--reviewer` is required.
+- It accepts only notes directly under `30_Resources/AI-Wiki/` with `type: concept` and `origin: ai`, and every cited Source must exist. A note that is already verified is left unchanged. When several notes are given, all are checked before any is marked.
+- The command makes no LLM call and does not judge the note. The mechanical count is an aid; the reviewer compares the note's claims with the Source before marking. The rules for this delegated review are in `90_System/Docs/AI_BOUNDARIES.md`.
+- A verified note is protected: later scans do not update it.
 
 ### Explicit Write
 

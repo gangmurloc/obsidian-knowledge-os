@@ -128,7 +128,7 @@ Most documents are in English. The handoff notes and task prompts are in Korean.
 
 ## How this project is built
 
-The code is written by AI coding agents working under [AGENTS.md](AGENTS.md). Design review happens in a separate assistant session, and the human owner runs the real model, reviews dry-run output, and approves every write.
+The code is written by AI coding agents working under [AGENTS.md](AGENTS.md). The human owner decides what is written. The owner may delegate running the model, applying a reviewed plan, and verifying notes against their Sources to the coding agent; a note verified that way says so with `verified_by: ai`.
 
 ## License
 

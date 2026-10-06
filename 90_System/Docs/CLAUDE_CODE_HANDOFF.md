@@ -78,8 +78,8 @@ remote: origin https://github.com/gangmurloc/obsidian-knowledge-os (public)
 stable tag: ai-wiki-v1 (Complete AI Wiki v1 end-to-end pipeline)
 ```
 
-- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋 → `Add saved plans that can be reviewed and applied without a model call` → plan 문서 커밋 → `Tell the curator which candidates have evidence in a method subsection` → curator 문서 커밋.
-- Curator 신호 추가까지 모두 커밋됐다. 미커밋 변경은 없다.
+- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋 → `Add saved plans that can be reviewed and applied without a model call` → plan 문서 커밋 → `Tell the curator which candidates have evidence in a method subsection` → curator 문서 커밋 → `Add delegated note verification that records the AI reviewer` → A-MEM note 커밋 → 검증 문서 커밋.
+- 검증 기능과 A-MEM note 5개까지 모두 커밋됐다. 미커밋 변경은 없다.
 - 2026-10-04에 공개 저장소로 올리면서 `30_Resources/Sources/`를 모든 커밋에서 제거했다. 논문 전문을 공개 재배포하지 않기 위해서다. 그래서 그 전에 문서나 프롬프트에 적어 둔 커밋 해시(`110bd8e`, `cd892c2`, `9f350e0`, `4951c90` 등)는 더 이상 유효하지 않다. 해시는 `git log --oneline`으로 확인한다.
 - Source 노트는 이제 git이 추적하지 않는다(`.gitignore`). 파일은 vault에 그대로 있고 Google Drive로만 보존된다.
 - 기록을 다시 쓰기 전의 전체 저장소는 `C:\Users\GIL\obsidian-knowledge-os-backup-20261004\vault-before-publish.bundle`에 백업돼 있다.
@@ -283,6 +283,18 @@ Source Markdown
 - Curator는 여전히 기존 후보 중에서 선택만 한다. 새 concept 생성, rename, merge, 내용 수정은 할 수 없다. 자동 병합도 추가하지 않았다. Quality gate는 바꾸지 않았다.
 - 실제 실행 한 번에서 curator가 `Memory Evolution`을 골랐고, 사유에 "methodology subsection 'memory evolution'이 뒷받침하므로 mechanism 접미어가 붙은 변형보다 우선"이라고 적었다. 한 번의 결과이므로 항상 그렇다고 볼 수는 없다.
 
+### 16. 위임 검증: AI가 `human_verified`를 표시
+
+- 2026-10-06에 사용자가 결정했다. 그전까지는 사람만 `human_verified: true`로 바꿀 수 있었다. 이제 AI 검토자도 AI-Wiki note에 한해 바꿀 수 있다.
+- 표시가 사실과 어긋나지 않도록, AI가 표시한 note에는 `verified_by: ai` 속성과 `## Provenance`의 `Verification` 줄(검토자, 날짜, 원문에서 그대로 찾은 evidence 수)이 함께 남는다. 사람이 직접 확인한 note에는 `verified_by`가 없다.
+- `ai-wiki verify --note <파일>`은 note가 인용한 Source가 있는지와 evidence excerpt가 원문에 그대로 있는지를 보고한다. `--write --reviewer <이름>`을 붙이면 표시한다. LLM을 호출하지 않는다.
+- 대상은 `30_Resources/AI-Wiki/` 바로 아래의 `type: concept`, `origin: ai` note뿐이다. Scan과 apply는 여전히 이 값을 바꾸지 않는다.
+- 명령은 기계적 확인만 한다. 주장과 원문의 대조는 검토자가 한다. 원문이 뒷받침하지 않는 주장이 있으면 표시하지 않는다.
+- 표시된 note는 보호된다. 이후 scan이 갱신하지 않는다.
+- `knowledge_status: understood`/`applied`와 Knowledge 승격은 여전히 사람의 판단이다.
+- 규칙은 `AI_BOUNDARIES.md`의 "Delegated Verification"과 `DATA_CONTRACT.md`의 `human_verified`, `verified_by`에 적었다.
+- `CLAUDE_PROJECT_INSTRUCTIONS.md`의 3절에는 아직 "AI는 `human_verified: true`를 설정하지 않는다"고 적혀 있다. 이 문서는 claude.ai 프로젝트 지침과 함께 고쳐야 하므로 Claude Code가 고치지 않았다. 사용자가 두 곳을 함께 고쳐야 한다.
+
 ## 핵심 코드 지도
 
 - `.automation/run.py`: CLI entrypoint
@@ -302,6 +314,7 @@ Source Markdown
 - `.automation/knowledge_os/ai_wiki/quality.py`: semantic quality gate
 - `.automation/knowledge_os/ai_wiki/coverage.py`: evidence 위치 찾기, targeted 추출 대상 선정, method coverage 진단
 - `.automation/knowledge_os/ai_wiki/plan_file.py`: plan 저장, 검증, 적용
+- `.automation/knowledge_os/ai_wiki/verify.py`: note의 evidence 확인과 위임 검증 표시
 - `.automation/knowledge_os/ai_wiki/engine.py`: end-to-end orchestration
 - `.automation/knowledge_os/ai_wiki/render.py`: AI-Wiki Markdown rendering
 - `.automation/tests/test_ai_wiki.py`: extraction/selection/write safety tests
@@ -311,14 +324,15 @@ Source Markdown
 - `.automation/tests/test_method_coverage.py`: subsection span, chunk offset, excerpt 위치, coverage report tests
 - `.automation/tests/test_method_recovery.py`: targeted extraction 대상 선정, 상한, 실패 처리, provenance tests
 - `.automation/tests/test_plan_apply.py`: plan 저장, 검증 거부 조건, 적용 tests
+- `.automation/tests/test_verify.py`: evidence 확인, 표시 범위와 거부 조건 tests
 
 ## 최신 테스트 상태
 
-2026-10-06 기준 (curator 신호 추가 반영 후):
+2026-10-06 기준 (위임 검증 반영 후):
 
 ```text
 python -m unittest discover -s .automation/tests
-Ran 237 tests in 13.269s
+Ran 247 tests in 16.269s
 OK
 ```
 
@@ -488,7 +502,25 @@ review: .automation/state/plans/20261005T160423Z_A-MEM.review.md
 
 첫 번째 plan(`20261005T152047Z_A-MEM`)은 `Memory Evolution Mechanism`의 evidence가 모두 부록에서 나온 것이라 쓰지 않는다. 파일은 지우지 않았다. 두 번째 plan을 적용하면 첫 번째는 자동으로 무효가 된다.
 
-두 plan의 note 5개 중 4개는 내용이 완전히 같다(content hash 일치). 다섯 번째만 `Memory Evolution Mechanism`에서 `Memory Evolution`으로 바뀌었다. 아직 적용하지 않았다.
+두 plan의 note 5개 중 4개는 내용이 완전히 같다(content hash 일치). 다섯 번째만 `Memory Evolution Mechanism`에서 `Memory Evolution`으로 바뀌었다.
+
+2026-10-06에 사용자가 검토용 사본을 확인한 뒤 지시해 두 번째 plan을 `ai-wiki apply --write`로 적용했다. `30_Resources/AI-Wiki/`에 note 5개가 생겼고 A-MEM의 processing state가 기록됐다. 적용 뒤 확인한 것은 다음과 같다: 쓰인 note 5개가 plan의 내용과 byte 단위로 같다, Source 파일은 바뀌지 않았다, 기존 note 6개는 바뀌지 않았다, 다시 scan하면 A-MEM은 `unchanged`로 건너뛰고 LLM 호출이 0회다.
+
+같은 날 사용자가 AI의 검증 표시를 허용했고(16번), Claude Code가 note 5개를 Source 원문(초록, 1절 앞부분, 3절 전체)과 대조했다.
+
+```text
+Agentic Memory                         evidence 3/3 원문 그대로
+Memory Note                            evidence 2/3 원문 그대로
+Autonomous Link Generation Mechanism   evidence 3/3 원문 그대로
+Memory Evolution                       evidence 1/3 원문 그대로
+Retrieve Relative Memory               evidence 3/3 원문 그대로
+```
+
+- 다섯 note 모두 정의, 핵심 아이디어, 동작 설명, key point가 원문에 근거가 있었다. 원문이 뒷받침하지 않는 주장은 찾지 못했다.
+- 그대로 찾지 못한 evidence 3개도 내용은 원문과 같다. `Memory Note`의 2번은 한 문장의 네 구절을 `...`으로 이은 것이고, `Memory Evolution`의 2번과 3번은 원문에서 페이지 경계와 수식 기호 markup 때문에 문장이 끊겨 있다.
+- 다섯 note를 `human_verified: true`, `verified_by: ai`로 표시했다. 검토자는 Claude Code다.
+- Open Questions는 모델이 만든 질문이라 검증 대상이 아니다.
+- 이전부터 있던 note 6개(`attention_is_all_you_need` 기반)는 검토하지 않았고 `human_verified: false` 그대로다.
 
 Claude Code가 검토용 사본을 읽고 확인한 것(Source 원문과 대조한 것은 아니다):
 
@@ -579,7 +611,7 @@ Curator는 기존 candidate만 선택할 수 있으므로 누락된 mechanism을
 
 이 절의 targeted extraction은 Stage 3으로 구현됐다("지금까지의 진행 과정" 13번). 아래 설계 원칙과 그 뒤의 "Claude Code용 목표 프롬프트"는 구현의 근거로 남겨 둔 기록이다. 남은 작업은 다음과 같다.
 
-1. **첫 적용.** 검토 수단은 plan 저장·적용으로 구현됐다(14번). 사용자가 검토용 사본을 읽고, 받아들일 만하면 `ai-wiki apply --plan ... --write`를 실행한다. 대상은 두 번째 A-MEM plan(`20261005T160423Z_A-MEM`)이다.
+1. **첫 적용.** 끝났다. 2026-10-06에 A-MEM의 두 번째 plan(`20261005T160423Z_A-MEM`)을 적용해 note 5개를 썼다. 이 note들은 Claude Code가 원문과 대조한 뒤 `human_verified: true`, `verified_by: ai`로 표시했다(16번). 사람이 직접 확인한 것은 아니다.
 2. **Duplicate-risk group의 대표 선택.** Curator에 evidence 위치 신호를 추가했다(15번). 실제 실행은 한 번뿐이므로, 다른 논문에서도 method 절 쪽 후보를 고르는지 지켜본다.
 3. **Quality gate의 cover 정의(F1).** Gate는 제목이 heading과 일치해야 cover로 본다. Targeted 추출로 복구한 후보는 제목이 달라도 그 subsection에서 나온 것이 분명하므로, gate가 evidence나 provenance 기준 cover도 인정할지 결정해야 한다. Gate를 바꾸는 일이라 설계 검토가 필요하다.
 4. **Role 승격의 heading 줄 의존(F2).** `_apply_source_context_roles`는 후보를 뽑은 chunk에 heading 줄이 있어야 method_entity를 mechanism으로 올린다. Subsection 본문이 다음 chunk로 이어지면 승격되지 않는다. Offset 기준으로 바꿀 수 있다.
@@ -699,7 +731,7 @@ G:\내 드라이브\Obsidian\GILVault\GIL
 현재 상태:
 - PDF ingestion, processing view, Local Ollama structured extraction, deterministic identity deduplication, source-level curator, semantic quality gate가 구현되어 있다.
 - 현재 uncommitted changes를 되돌리거나 덮어쓰지 마라.
-- 전체 unit test 237개가 통과한다.
+- 전체 unit test 247개가 통과한다.
 - 실제 A-MEM dry-run에서 methodology subsection 4개는 정확히 감지했지만 general extraction이 named mechanism 후보를 만들지 못해 quality_gate가 failed 되었다.
 - curator는 선택 전용이므로 누락 후보를 생성할 수 없다.
 
@@ -767,7 +799,7 @@ Dry-run report 추가:
 ## Claude Code 첫 실행 체크리스트
 
 1. `git status --short`로 미커밋 변경이 있는지 확인한다.
-2. 현재 tests를 먼저 실행해 baseline 237 tests 통과를 확인한다.
+2. 현재 tests를 먼저 실행해 baseline 247 tests 통과를 확인한다.
 3. 실제 Source와 AI-Wiki 파일을 수정하지 않는다.
 4. `preprocess.py`가 subsection body/provenance를 제공할 수 있도록 최소 확장한다.
 5. 기존 general extraction, curator, quality gate를 재사용한다.
@@ -783,23 +815,19 @@ python -m unittest discover -s ".automation\tests" -v
 git diff --check
 ```
 
-사용자가 실행할 다음 명령. 먼저 검토용 사본을 읽는다.
-
-```text
-.automation\state\plans\20261005T160423Z_A-MEM.review.md
-```
-
-받아들일 만하면 저장된 plan을 그대로 적용한다. LLM을 호출하지 않으므로 터널이 없어도 된다.
+A-MEM은 적용이 끝났다. 다음 Source는 같은 순서로 진행한다. 먼저 plan을 저장한다(터널 필요).
 
 ```powershell
-python ".automation\run.py" ai-wiki apply --plan ".automation\state\plans\20261005T160423Z_A-MEM.json" --write
+python ".automation\run.py" ai-wiki scan --source "<Source 파일명>.md" --save-plan
 ```
 
-받아들일 수 없으면 적용하지 않고 새 plan을 만든다.
+출력의 `plan_review` 경로에 있는 검토용 사본을 읽는다. 받아들일 만하면 저장된 plan을 그대로 적용한다. LLM을 호출하지 않으므로 터널이 없어도 된다.
 
 ```powershell
-python ".automation\run.py" ai-wiki scan --source "A-MEM.md" --save-plan
+python ".automation\run.py" ai-wiki apply --plan ".automation\state\plans\<plan>.json" --write
 ```
+
+받아들일 수 없으면 적용하지 않고 plan을 다시 만든다.
 
 Quality gate가 `pass`이고 selected concepts와 evidence가 수동 검토를 통과하기 전에는 `--write`를 사용하지 않는다.
 

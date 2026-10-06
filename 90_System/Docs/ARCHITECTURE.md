@@ -5,7 +5,7 @@ knowledge_status: processed
 domain:
   - knowledge-management
 created: 2026-09-22
-updated: 2026-10-04
+updated: 2026-10-06
 human_verified: false
 ---
 
@@ -88,7 +88,7 @@ Bases + Graph View provide visualization.
 
 - `30_Resources/AI-Wiki/` is machine-maintained synthesis.
 - AI may revise these notes when evidence changes, but it must preserve provenance and avoid unsupported claims.
-- `human_verified: false` is the default until a person reviews the note.
+- `human_verified: false` is the default until the note is reviewed against its Sources. A person may set it to `true`, and so may an AI reviewer under the Delegated Verification rules in [[AI_BOUNDARIES]]; an AI review is recorded as `verified_by: ai`.
 
 ### Human Review
 
