@@ -8,6 +8,7 @@ from typing import Sequence
 
 from .ai_wiki import AIWikiError, ScanScope, process_ai_wiki
 from .ai_wiki.plan_file import apply_plan, plan_block_reason, review_path, save_plan
+from .ai_wiki.verify import check_note
 from .llm import (
     GenerateRequest,
     LLMConfig,
@@ -156,6 +157,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--write",
         action="store_true",
         help="Write the plan's notes and processing state. Without this flag it only validates and prints.",
+    )
+    verify = ai_wiki_commands.add_parser(
+        "verify",
+        help="Check AI-Wiki notes against their Sources and optionally record a delegated review.",
+    )
+    verify.add_argument(
+        "--note",
+        action="append",
+        required=True,
+        help="AI-Wiki note filename; repeat the flag for several notes.",
+    )
+    verify.add_argument(
+        "--write",
+        action="store_true",
+        help=(
+            "Set human_verified: true and record verified_by: ai. "
+            "Without this flag the notes are only checked."
+        ),
+    )
+    verify.add_argument(
+        "--reviewer",
+        help="Name recorded in the note as the AI reviewer; required with --write.",
     )
     return parser
 
@@ -429,6 +452,37 @@ def _run_ai_wiki_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ai_wiki_verify(args: argparse.Namespace) -> int:
+    if args.write and not (args.reviewer or "").strip():
+        raise AIWikiError("--reviewer is required with --write")
+    # Check every note before marking any, so one bad note leaves the others untouched.
+    checks = [check_note(vault_root=args.vault, note=note) for note in args.note]
+    if args.write:
+        checks = [
+            check_note(vault_root=args.vault, note=note, reviewer=args.reviewer, write=True)
+            for note in args.note
+        ]
+    print(f"mode: {'write' if args.write else 'dry-run'}")
+    for check in checks:
+        print(f"note: {check.relative_path}")
+        if check.status == "already verified":
+            print("  status: already verified; left unchanged")
+            continue
+        print(f"  title: {check.title}")
+        print(f"  sources: {', '.join(check.sources)}")
+        print(f"  evidence_located: {check.evidence_located}/{check.evidence_total}")
+        missing = ", ".join(str(number) for number in check.evidence_not_found) or "(none)"
+        print(f"  evidence_not_found: {missing}")
+        if check.status == "marked":
+            print(
+                "  status: marked human_verified: true "
+                f"(verified_by: ai, reviewer: {args.reviewer.strip()})"
+            )
+        else:
+            print("  status: checked; nothing was written")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -463,6 +517,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "ai-wiki":
             if args.ai_wiki_command == "apply":
                 return _run_ai_wiki_apply(args)
+            if args.ai_wiki_command == "verify":
+                return _run_ai_wiki_verify(args)
             return _run_ai_wiki_scan(args)
         else:  # pragma: no cover - argparse enforces the available commands.
             parser.error(f"Unknown command: {args.command}")
