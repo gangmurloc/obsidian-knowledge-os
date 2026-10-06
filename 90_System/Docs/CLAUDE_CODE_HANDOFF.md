@@ -78,8 +78,8 @@ remote: origin https://github.com/gangmurloc/obsidian-knowledge-os (public)
 stable tag: ai-wiki-v1 (Complete AI Wiki v1 end-to-end pipeline)
 ```
 
-- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋 → `Add saved plans that can be reviewed and applied without a model call` → plan 문서 커밋 → `Tell the curator which candidates have evidence in a method subsection` → curator 문서 커밋 → `Add delegated note verification that records the AI reviewer` → A-MEM note 커밋 → 검증 문서 커밋.
-- 검증 기능과 A-MEM note 5개까지 모두 커밋됐다. 미커밋 변경은 없다.
+- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋 → `Add saved plans that can be reviewed and applied without a model call` → plan 문서 커밋 → `Tell the curator which candidates have evidence in a method subsection` → curator 문서 커밋 → `Add delegated note verification that records the AI reviewer` → A-MEM note 커밋 → 검증 문서 커밋 → 기존 note 검토 결과 커밋.
+- 기존 note 6개의 검토 결과까지 모두 커밋됐다. 미커밋 변경은 없다.
 - 2026-10-04에 공개 저장소로 올리면서 `30_Resources/Sources/`를 모든 커밋에서 제거했다. 논문 전문을 공개 재배포하지 않기 위해서다. 그래서 그 전에 문서나 프롬프트에 적어 둔 커밋 해시(`110bd8e`, `cd892c2`, `9f350e0`, `4951c90` 등)는 더 이상 유효하지 않다. 해시는 `git log --oneline`으로 확인한다.
 - Source 노트는 이제 git이 추적하지 않는다(`.gitignore`). 파일은 vault에 그대로 있고 Google Drive로만 보존된다.
 - 기록을 다시 쓰기 전의 전체 저장소는 `C:\Users\GIL\obsidian-knowledge-os-backup-20261004\vault-before-publish.bundle`에 백업돼 있다.
@@ -520,7 +520,28 @@ Retrieve Relative Memory               evidence 3/3 원문 그대로
 - 그대로 찾지 못한 evidence 3개도 내용은 원문과 같다. `Memory Note`의 2번은 한 문장의 네 구절을 `...`으로 이은 것이고, `Memory Evolution`의 2번과 3번은 원문에서 페이지 경계와 수식 기호 markup 때문에 문장이 끊겨 있다.
 - 다섯 note를 `human_verified: true`, `verified_by: ai`로 표시했다. 검토자는 Claude Code다.
 - Open Questions는 모델이 만든 질문이라 검증 대상이 아니다.
-- 이전부터 있던 note 6개(`attention_is_all_you_need` 기반)는 검토하지 않았고 `human_verified: false` 그대로다.
+
+이어서 사용자 지시로 이전부터 있던 note 6개(`attention_is_all_you_need` 기반, `qwen3.5:4b`가 2026-09-27에 생성)도 같은 방식으로 검토했다. Source의 3.2절, 4절, 6.1절과 초록·서론·결론의 해당 문장을 읽고 대조했다. 2개를 표시했고 4개는 표시하지 않았다.
+
+```text
+Multi-Head Attention                                    evidence 2/3  표시함
+Scaled Dot-Product Attention                            evidence 2/3  표시함
+Attention Mechanism in Neural Machine Translation       evidence 0/3  표시 안 함
+Self-Attention Mechanism                                evidence 3/6  표시 안 함
+Transformer Architecture                                evidence 6/9  표시 안 함
+Transformer Model Performance and Training Efficiency   evidence 2/3  표시 안 함
+```
+
+표시하지 않은 이유:
+
+- `Attention Mechanism in Neural Machine Translation`: evidence excerpt 3개가 모두 Source에 없는 문장이다. 모델이 지어낸 요약문으로 보인다. "번역 품질을 sequence 길이 제약에서 분리한다"는 주장도 Source에 없다.
+- `Self-Attention Mechanism`: key point 하나와 evidence 5의 claim이 Source를 뒤집어 적었다. Source는 "separable convolution의 복잡도가 self-attention layer와 point-wise feed-forward layer를 합친 것과 같다"고 하는데, note는 "self-attention의 복잡도가 separable convolution과 feed-forward layer를 합친 것과 같다"고 적었다.
+- `Transformer Architecture`: Mechanism이 "self-attention으로 encoder와 decoder를 연결한다"고 적었다. Source에서 둘을 잇는 것은 encoder 출력에 대한 multi-head attention이고, self-attention은 각 stack 안에서 쓰인다. Evidence 6은 excerpt에 claim의 내용(병렬화)이 없다. Open Questions 하나는 원래 설계에 positional encoding이 없다고 전제한다. 나머지 key point 15개는 Source에 근거가 있다.
+- `Transformer Model Performance and Training Efficiency`: Mechanism이 학습이 "perplexity를 최적화하고 floating-point 연산을 최소화한다"고 적었다. Source는 label smoothing이 perplexity를 나쁘게 한다고 하고, 연산량은 비용 비교를 위해 추정했을 뿐이다. 이 note는 개념이 아니라 실험 결과 요약이기도 하다.
+
+표시한 2개는 정의, mechanism, key point가 모두 Source의 3.2.1절과 3.2.2절에 있고, 그대로 찾지 못한 evidence 하나씩은 기호 표기 차이 때문이다.
+
+표시하지 않은 4개는 `human_verified: false` 그대로다. 표시하면 pipeline이 더는 갱신하지 않으므로, 틀린 내용이 있는 note를 표시하지 않고 남겨 두었다. 이 note들을 지우거나 고치는 것은 사람이 결정한다.
 
 Claude Code가 검토용 사본을 읽고 확인한 것(Source 원문과 대조한 것은 아니다):
 
@@ -613,6 +634,7 @@ Curator는 기존 candidate만 선택할 수 있으므로 누락된 mechanism을
 
 1. **첫 적용.** 끝났다. 2026-10-06에 A-MEM의 두 번째 plan(`20261005T160423Z_A-MEM`)을 적용해 note 5개를 썼다. 이 note들은 Claude Code가 원문과 대조한 뒤 `human_verified: true`, `verified_by: ai`로 표시했다(16번). 사람이 직접 확인한 것은 아니다.
 2. **Duplicate-risk group의 대표 선택.** Curator에 evidence 위치 신호를 추가했다(15번). 실제 실행은 한 번뿐이므로, 다른 논문에서도 method 절 쪽 후보를 고르는지 지켜본다.
+3. **검토를 통과하지 못한 note 4개.** `attention_is_all_you_need` 기반 note 4개에 Source와 어긋나는 내용이 있다. Pipeline은 기존 note에 내용을 더할 뿐 틀린 문장을 고치지 않고, 이 Source는 이미 처리된 것으로 기록돼 다시 처리되지 않는다. 다시 만들려면 사람이 그 note들을 지우고 Source를 다시 처리하게 해야 하는데, 지금은 다시 처리하게 하는 명령이 없다. 이 Source는 예전 extractor(pypdf)로 만들어져 줄바꿈이 많으므로 `ingest-paper --replace`로 다시 만드는 것도 함께 검토한다.
 3. **Quality gate의 cover 정의(F1).** Gate는 제목이 heading과 일치해야 cover로 본다. Targeted 추출로 복구한 후보는 제목이 달라도 그 subsection에서 나온 것이 분명하므로, gate가 evidence나 provenance 기준 cover도 인정할지 결정해야 한다. Gate를 바꾸는 일이라 설계 검토가 필요하다.
 4. **Role 승격의 heading 줄 의존(F2).** `_apply_source_context_roles`는 후보를 뽑은 chunk에 heading 줄이 있어야 method_entity를 mechanism으로 올린다. Subsection 본문이 다음 chunk로 이어지면 승격되지 않는다. Offset 기준으로 바꿀 수 있다.
 5. **Method root 감지 확장(F3).** `Our Approach`, `Proposed Method`, `Framework`, 시스템 이름 섹션은 method root로 감지되지 않는다. 이런 Source에서는 복구와 coverage 검사가 둘 다 조용히 꺼진다.

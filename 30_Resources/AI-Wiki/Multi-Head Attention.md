@@ -10,7 +10,8 @@ created: '2026-09-27'
 updated: '2026-09-27'
 sources:
 - '[[attention_is_all_you_need]]'
-human_verified: false
+human_verified: true
+verified_by: ai
 ---
 
 # Multi-Head Attention
@@ -80,3 +81,4 @@ Concatenating outputs of multiple parallel attention layers (head_i = Attention(
 - Backend: `ollama`
 - Model: `qwen3.5:4b`
 - Evidence sources: [[attention_is_all_you_need]]
+- Verification: reviewed by Claude Code (AI) on 2026-10-06; 2 of 3 evidence excerpts found verbatim in the Source.
