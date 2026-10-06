@@ -635,11 +635,11 @@ Curator는 기존 candidate만 선택할 수 있으므로 누락된 mechanism을
 1. **첫 적용.** 끝났다. 2026-10-06에 A-MEM의 두 번째 plan(`20261005T160423Z_A-MEM`)을 적용해 note 5개를 썼다. 이 note들은 Claude Code가 원문과 대조한 뒤 `human_verified: true`, `verified_by: ai`로 표시했다(16번). 사람이 직접 확인한 것은 아니다.
 2. **Duplicate-risk group의 대표 선택.** Curator에 evidence 위치 신호를 추가했다(15번). 실제 실행은 한 번뿐이므로, 다른 논문에서도 method 절 쪽 후보를 고르는지 지켜본다.
 3. **검토를 통과하지 못한 note 4개.** `attention_is_all_you_need` 기반 note 4개에 Source와 어긋나는 내용이 있다. Pipeline은 기존 note에 내용을 더할 뿐 틀린 문장을 고치지 않고, 이 Source는 이미 처리된 것으로 기록돼 다시 처리되지 않는다. 다시 만들려면 사람이 그 note들을 지우고 Source를 다시 처리하게 해야 하는데, 지금은 다시 처리하게 하는 명령이 없다. 이 Source는 예전 extractor(pypdf)로 만들어져 줄바꿈이 많으므로 `ingest-paper --replace`로 다시 만드는 것도 함께 검토한다.
-3. **Quality gate의 cover 정의(F1).** Gate는 제목이 heading과 일치해야 cover로 본다. Targeted 추출로 복구한 후보는 제목이 달라도 그 subsection에서 나온 것이 분명하므로, gate가 evidence나 provenance 기준 cover도 인정할지 결정해야 한다. Gate를 바꾸는 일이라 설계 검토가 필요하다.
-4. **Role 승격의 heading 줄 의존(F2).** `_apply_source_context_roles`는 후보를 뽑은 chunk에 heading 줄이 있어야 method_entity를 mechanism으로 올린다. Subsection 본문이 다음 chunk로 이어지면 승격되지 않는다. Offset 기준으로 바꿀 수 있다.
-5. **Method root 감지 확장(F3).** `Our Approach`, `Proposed Method`, `Framework`, 시스템 이름 섹션은 method root로 감지되지 않는다. 이런 Source에서는 복구와 coverage 검사가 둘 다 조용히 꺼진다.
-6. **다른 논문으로 검증.** 지금까지 실제 실행은 A-MEM 한 편뿐이다. 구조가 다른 논문 2~3편으로 dry-run해 과적합 여부를 확인한다.
-7. **실행 간 변동.** `temperature=0`이어도 실행마다 후보가 조금 달라진다. 비교 실험을 하려면 seed 고정을 검토한다.
+4. **Quality gate의 cover 정의(F1).** Gate는 제목이 heading과 일치해야 cover로 본다. Targeted 추출로 복구한 후보는 제목이 달라도 그 subsection에서 나온 것이 분명하므로, gate가 evidence나 provenance 기준 cover도 인정할지 결정해야 한다. Gate를 바꾸는 일이라 설계 검토가 필요하다.
+5. **Role 승격의 heading 줄 의존(F2).** `_apply_source_context_roles`는 후보를 뽑은 chunk에 heading 줄이 있어야 method_entity를 mechanism으로 올린다. Subsection 본문이 다음 chunk로 이어지면 승격되지 않는다. Offset 기준으로 바꿀 수 있다.
+6. **Method root 감지 확장(F3).** `Our Approach`, `Proposed Method`, `Framework`, 시스템 이름 섹션은 method root로 감지되지 않는다. 이런 Source에서는 복구와 coverage 검사가 둘 다 조용히 꺼진다.
+7. **다른 논문으로 검증.** 지금까지 실제 실행은 A-MEM 한 편뿐이다. 구조가 다른 논문 2~3편으로 dry-run해 과적합 여부를 확인한다.
+8. **실행 간 변동.** `temperature=0`이어도 실행마다 후보가 조금 달라진다. 비교 실험을 하려면 seed 고정을 검토한다.
 
 일반 chunk extraction은 유지하되, 명시적인 core-method subsection 중 아직 mechanism/component candidate로 cover되지 않은 subsection만 대상으로 bounded targeted extraction을 추가한다.
 
