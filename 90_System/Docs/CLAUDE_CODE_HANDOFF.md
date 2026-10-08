@@ -6,7 +6,7 @@ domain:
   - knowledge-management
   - software-engineering
 created: 2026-10-04
-updated: 2026-10-06
+updated: 2026-10-08
 human_verified: false
 ---
 
@@ -78,8 +78,8 @@ remote: origin https://github.com/gangmurloc/obsidian-knowledge-os (public)
 stable tag: ai-wiki-v1 (Complete AI Wiki v1 end-to-end pipeline)
 ```
 
-- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋 → `Add saved plans that can be reviewed and applied without a model call` → plan 문서 커밋 → `Tell the curator which candidates have evidence in a method subsection` → curator 문서 커밋 → `Add delegated note verification that records the AI reviewer` → A-MEM note 커밋 → 검증 문서 커밋 → 기존 note 검토 결과 커밋.
-- 기존 note 6개의 검토 결과까지 모두 커밋됐다. 미커밋 변경은 없다.
+- 최근 커밋 순서: `Complete AI Wiki v1 end-to-end pipeline` → `Refine AI Wiki concept ontology rules` → `Add semantic quality gate and method-aware weak supervision` → `Route LLM calls to lab-server qwen3.5:27b and unload after each run` → 공개 저장소 준비 커밋들 → `Add method subsection spans and coverage diagnostics` → Stage 1 문서 커밋 → `Add targeted extraction for uncovered method subsections` → Stage 3 문서 커밋 → `Add saved plans that can be reviewed and applied without a model call` → plan 문서 커밋 → `Tell the curator which candidates have evidence in a method subsection` → curator 문서 커밋 → `Add delegated note verification that records the AI reviewer` → A-MEM note 커밋 → 검증 문서 커밋 → 기존 note 검토 결과 커밋 → `Skip verified concepts without leaving their Source unprocessed` → `Recognize qualified method section headings` → note 4개 삭제와 문서 커밋.
+- 위 커밋까지 모두 올라가 있다. 미커밋 변경은 없다. `attention_is_all_you_need`는 note 4개를 지운 뒤 아직 다시 처리하지 않은 상태다.
 - 2026-10-04에 공개 저장소로 올리면서 `30_Resources/Sources/`를 모든 커밋에서 제거했다. 논문 전문을 공개 재배포하지 않기 위해서다. 그래서 그 전에 문서나 프롬프트에 적어 둔 커밋 해시(`110bd8e`, `cd892c2`, `9f350e0`, `4951c90` 등)는 더 이상 유효하지 않다. 해시는 `git log --oneline`으로 확인한다.
 - Source 노트는 이제 git이 추적하지 않는다(`.gitignore`). 파일은 vault에 그대로 있고 Google Drive로만 보존된다.
 - 기록을 다시 쓰기 전의 전체 저장소는 `C:\Users\GIL\obsidian-knowledge-os-backup-20261004\vault-before-publish.bundle`에 백업돼 있다.
@@ -295,6 +295,21 @@ Source Markdown
 - 규칙은 `AI_BOUNDARIES.md`의 "Delegated Verification"과 `DATA_CONTRACT.md`의 `human_verified`, `verified_by`에 적었다.
 - `CLAUDE_PROJECT_INSTRUCTIONS.md`의 3절에는 아직 "AI는 `human_verified: true`를 설정하지 않는다"고 적혀 있다. 이 문서는 claude.ai 프로젝트 지침과 함께 고쳐야 하므로 Claude Code가 고치지 않았다. 사용자가 두 곳을 함께 고쳐야 한다.
 
+### 17. 검증된 note와 같은 concept이 다시 나올 때
+
+- 문제: 예전 규칙은 보호된 note와 identity가 같은 concept이 나오면 그 Source의 state update를 버렸다. 검증된 note가 생긴 뒤로는 그 Source가 매번 다시 처리되고, 처리된 Source가 없어 plan도 저장되지 않는다.
+- 변경: 대상이 검증된 AI note(`human_verified`가 `false`가 아닌 AI concept note)이면 concept을 건너뛰고 warning(`Verified concept left unchanged`)만 남긴다. Source는 처리된 것으로 기록한다.
+- `origin: me` note, 읽을 수 없는 note, identity가 겹치는 note 같은 다른 보호 대상은 예전처럼 Source를 처리 안 됨으로 남긴다.
+- 한계: 검증된 note에는 새 Source의 evidence가 더해지지 않는다.
+
+### 18. Method root 감지 확장 (F3의 일부)
+
+- 실제 사례: `attention_is_all_you_need`의 method 절 제목은 "3 Model Architecture"다. 예전 규칙은 제목 전체가 Method/Methods/Methodology/Approach/Architecture와 같아야 해서 이 절을 method root로 보지 않았다. 그러면 subsection이 하나도 감지되지 않고 복구와 coverage 검사가 꺼진다.
+- 변경: 제목의 마지막 단어가 위 다섯 단어 중 하나이고 그 앞에 수식어가 최대 2개면 method root로 본다. "Model Architecture", "Our Approach", "Proposed Method", "The Proposed Approach"가 해당한다. 마지막 단어의 오타 허용은 그대로다.
+- 수식어에 Related, Existing, Prior, Previous, Other, Alternative가 있거나 실험·평가 계열 단어(Evaluation, Baseline, Experiment 등)가 있으면 제외한다.
+- "Framework"와 시스템 이름으로 된 절은 여전히 감지하지 않는다. 시스템 이름 절은 Source title의 alias와 비교해야 하므로 따로 다룬다.
+- Processing view의 content는 바뀌지 않는다. 바뀌는 것은 감지되는 subsection 목록뿐이다.
+
 ## 핵심 코드 지도
 
 - `.automation/run.py`: CLI entrypoint
@@ -328,11 +343,11 @@ Source Markdown
 
 ## 최신 테스트 상태
 
-2026-10-06 기준 (위임 검증 반영 후):
+2026-10-08 기준 (method root 감지 확장 반영 후):
 
 ```text
 python -m unittest discover -s .automation/tests
-Ran 247 tests in 16.269s
+Ran 250 tests in 14.162s
 OK
 ```
 
@@ -634,10 +649,10 @@ Curator는 기존 candidate만 선택할 수 있으므로 누락된 mechanism을
 
 1. **첫 적용.** 끝났다. 2026-10-06에 A-MEM의 두 번째 plan(`20261005T160423Z_A-MEM`)을 적용해 note 5개를 썼다. 이 note들은 Claude Code가 원문과 대조한 뒤 `human_verified: true`, `verified_by: ai`로 표시했다(16번). 사람이 직접 확인한 것은 아니다.
 2. **Duplicate-risk group의 대표 선택.** Curator에 evidence 위치 신호를 추가했다(15번). 실제 실행은 한 번뿐이므로, 다른 논문에서도 method 절 쪽 후보를 고르는지 지켜본다.
-3. **검토를 통과하지 못한 note 4개.** `attention_is_all_you_need` 기반 note 4개에 Source와 어긋나는 내용이 있다. Pipeline은 기존 note에 내용을 더할 뿐 틀린 문장을 고치지 않고, 이 Source는 이미 처리된 것으로 기록돼 다시 처리되지 않는다. 다시 만들려면 사람이 그 note들을 지우고 Source를 다시 처리하게 해야 하는데, 지금은 다시 처리하게 하는 명령이 없다. 이 Source는 예전 extractor(pypdf)로 만들어져 줄바꿈이 많으므로 `ingest-paper --replace`로 다시 만드는 것도 함께 검토한다.
+3. **`attention_is_all_you_need` 다시 처리 (진행 중).** 2026-10-08에 사용자 지시로 검토를 통과하지 못한 note 4개를 지웠다(git 기록에는 남아 있다). Source는 `ingest-paper --replace`로 현재 extractor(pymupdf4llm)로 다시 만들었다. 이제 heading이 Markdown으로 잡히고 References가 제외된다. 이전 Source는 `C:\Users\GIL\obsidian-knowledge-os-backup-20261004\Sources\Papers\`에 있다. 남은 일은 터널을 연 뒤 `ai-wiki scan --source "attention_is_all_you_need.md" --save-plan`으로 plan을 만들고, 검토해서 적용하고, 통과한 note를 검증 표시하는 것이다. 2026-10-08 현재 터널(`localhost:11435`)이 닫혀 있어 모델 실행을 못 했다.
 4. **Quality gate의 cover 정의(F1).** Gate는 제목이 heading과 일치해야 cover로 본다. Targeted 추출로 복구한 후보는 제목이 달라도 그 subsection에서 나온 것이 분명하므로, gate가 evidence나 provenance 기준 cover도 인정할지 결정해야 한다. Gate를 바꾸는 일이라 설계 검토가 필요하다.
 5. **Role 승격의 heading 줄 의존(F2).** `_apply_source_context_roles`는 후보를 뽑은 chunk에 heading 줄이 있어야 method_entity를 mechanism으로 올린다. Subsection 본문이 다음 chunk로 이어지면 승격되지 않는다. Offset 기준으로 바꿀 수 있다.
-6. **Method root 감지 확장(F3).** `Our Approach`, `Proposed Method`, `Framework`, 시스템 이름 섹션은 method root로 감지되지 않는다. 이런 Source에서는 복구와 coverage 검사가 둘 다 조용히 꺼진다.
+6. **Method root 감지 확장(F3).** 수식어가 붙은 제목(`Model Architecture`, `Our Approach`, `Proposed Method`)은 감지하게 됐다(18번). `Framework`와 시스템 이름 섹션은 아직 감지되지 않는다. 이런 Source에서는 복구와 coverage 검사가 둘 다 조용히 꺼진다.
 7. **다른 논문으로 검증.** 지금까지 실제 실행은 A-MEM 한 편뿐이다. 구조가 다른 논문 2~3편으로 dry-run해 과적합 여부를 확인한다.
 8. **실행 간 변동.** `temperature=0`이어도 실행마다 후보가 조금 달라진다. 비교 실험을 하려면 seed 고정을 검토한다.
 
@@ -753,7 +768,7 @@ G:\내 드라이브\Obsidian\GILVault\GIL
 현재 상태:
 - PDF ingestion, processing view, Local Ollama structured extraction, deterministic identity deduplication, source-level curator, semantic quality gate가 구현되어 있다.
 - 현재 uncommitted changes를 되돌리거나 덮어쓰지 마라.
-- 전체 unit test 247개가 통과한다.
+- 전체 unit test 250개가 통과한다.
 - 실제 A-MEM dry-run에서 methodology subsection 4개는 정확히 감지했지만 general extraction이 named mechanism 후보를 만들지 못해 quality_gate가 failed 되었다.
 - curator는 선택 전용이므로 누락 후보를 생성할 수 없다.
 
@@ -821,7 +836,7 @@ Dry-run report 추가:
 ## Claude Code 첫 실행 체크리스트
 
 1. `git status --short`로 미커밋 변경이 있는지 확인한다.
-2. 현재 tests를 먼저 실행해 baseline 247 tests 통과를 확인한다.
+2. 현재 tests를 먼저 실행해 baseline 250 tests 통과를 확인한다.
 3. 실제 Source와 AI-Wiki 파일을 수정하지 않는다.
 4. `preprocess.py`가 subsection body/provenance를 제공할 수 있도록 최소 확장한다.
 5. 기존 general extraction, curator, quality gate를 재사용한다.

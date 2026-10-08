@@ -48,7 +48,7 @@ On 2026-10-06 the vault owner decided that an AI reviewer may mark AI-Wiki notes
 - The flag is set only by the explicit `ai-wiki verify --write` step. Ingestion, scan, and apply never set it.
 - The reviewer first compares the note's definition, mechanism, key points, and evidence with the cited Source text. A note with a claim the Source does not support is not marked.
 - A marked note records the truth about who reviewed it: `verified_by: ai` in the properties and a `Verification` line under `## Provenance` with the reviewer, the date, and how many evidence excerpts were found verbatim in the Source. A note a person verified has no `verified_by`.
-- A verified note is protected like any other: the pipeline no longer updates it.
+- A verified note is protected: the pipeline no longer updates it. A later scan that produces the same concept skips it with a warning and still records the Source as processed.
 - `knowledge_status: understood` and `applied` remain human judgments, and promotion to Knowledge remains a human decision.
 
 ## Local AI Rule
