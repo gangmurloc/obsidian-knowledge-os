@@ -279,6 +279,40 @@ class MethodSubsectionSpanTests(unittest.TestCase):
         self.assertEqual(spans["record schema"].end, view.content.index("### Dynamic Routing"))
         self.assertEqual(spans["dynamic routing"].end, view.content.index("## Results"))
 
+    def test_qualified_method_headings_are_method_roots(self):
+        def detected(root: str) -> tuple[str, ...]:
+            return detect_methodology_subsections(
+                f"#### {root}\n\n##### 3.1 State Construction\n\nA text.\n\n"
+                "##### 3.2 Dynamic Routing\n\nB text."
+            )
+
+        for root in (
+            "3 Methodology",
+            "3 Model Architecture",
+            "3 Our Approach",
+            "3 Proposed Method",
+            "3 The Proposed Approach",
+            "3 Overall System Architecture",
+            "**3 Model Architecture**",
+            "3 Model Architechture",
+        ):
+            with self.subTest(root=root):
+                self.assertEqual(detected(root), ("state construction", "dynamic routing"))
+        for root in (
+            "2 Related Methods",
+            "2 Existing Approaches",
+            "2 Prior Methods",
+            "4 Evaluation Methodology",
+            "5 Baseline Methods",
+            "4 Experiment Method",
+            "3 Framework",
+            "3 HyperGraphRAG",
+            "3 A Very Long Qualified Model Architecture",
+            "3 Architecture Search Results",
+        ):
+            with self.subTest(root=root):
+                self.assertEqual(detected(root), ())
+
     def test_last_span_ends_at_content_end_when_the_root_never_closes(self):
         content = "## Approach\n\n### State Construction\n\nA text.\n\n### Dynamic Routing\n\nB text."
         view = build_ai_processing_view(content)

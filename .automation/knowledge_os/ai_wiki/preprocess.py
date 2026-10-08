@@ -38,6 +38,16 @@ FORMULA_INTRO_PATTERN = re.compile(
 )
 OMISSION_MARKER_PATTERN = re.compile(r"^> \[.+ omitted from AI extraction:")
 CORE_METHOD_SECTION_NAMES = {"method", "methods", "methodology", "approach", "architecture"}
+# "Model Architecture" and "Our Approach" are method sections; "Related Methods" is not.
+MAX_METHOD_HEADING_QUALIFIERS = 2
+NON_CORE_METHOD_QUALIFIERS = {
+    "alternative",
+    "existing",
+    "other",
+    "previous",
+    "prior",
+    "related",
+}
 NON_METHOD_SUBSECTION_TOKENS = {
     "ablation",
     "analysis",
@@ -134,13 +144,25 @@ def _edit_distance(left: str, right: str) -> int:
     return previous[-1]
 
 
-def _is_core_method_heading(canonical_title: str) -> bool:
-    if canonical_title in CORE_METHOD_SECTION_NAMES:
+def _is_core_method_term(token: str) -> bool:
+    if token in CORE_METHOD_SECTION_NAMES:
         return True
     return any(
-        len(canonical_title) >= 6 and _edit_distance(canonical_title, expected) <= 2
+        len(token) >= 6 and _edit_distance(token, expected) <= 2
         for expected in CORE_METHOD_SECTION_NAMES
         if len(expected) >= 6
+    )
+
+
+def _is_core_method_heading(canonical_title: str) -> bool:
+    """A core method term, optionally qualified: "Method", "Model Architecture", "Our Approach"."""
+    if _is_core_method_term(canonical_title):
+        return True
+    *qualifiers, term = canonical_title.split() or [""]
+    return bool(
+        0 < len(qualifiers) <= MAX_METHOD_HEADING_QUALIFIERS
+        and not set(qualifiers) & (NON_METHOD_SUBSECTION_TOKENS | NON_CORE_METHOD_QUALIFIERS)
+        and _is_core_method_term(term)
     )
 
 
