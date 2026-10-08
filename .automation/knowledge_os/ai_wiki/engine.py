@@ -41,6 +41,7 @@ from .models import (
     SourceNote,
     SourceValidationError,
     StructuredOutputError,
+    VerifiedNoteError,
 )
 from .ontology import concept_exclusion_reason, suggest_relations
 from .preprocess import (
@@ -222,13 +223,21 @@ def _load_state(path: Path) -> dict[str, Any]:
 def _existing_index(
     output_root: Path,
     plan: ProcessingPlan,
-) -> tuple[dict[str, ExistingConcept], dict[str, str], dict[str, str], dict[str, str]]:
+) -> tuple[
+    dict[str, ExistingConcept],
+    dict[str, str],
+    dict[str, str],
+    dict[str, str],
+    set[str],
+]:
     by_identity: dict[str, ExistingConcept] = {}
     filename_owners: dict[str, str] = {}
     protected_filenames: dict[str, str] = {}
     protected_identities: dict[str, str] = {}
+    # Keys of protected_filenames and protected_identities that belong to verified notes.
+    verified: set[str] = set()
     if not output_root.exists():
-        return by_identity, filename_owners, protected_filenames, protected_identities
+        return by_identity, filename_owners, protected_filenames, protected_identities, verified
 
     for path in sorted(output_root.glob("*.md"), key=lambda item: item.name.casefold()):
         try:
@@ -236,6 +245,8 @@ def _existing_index(
         except ProtectedNoteError as exc:
             protected_filenames[path.name.casefold()] = str(exc)
             protected_identities[concept_identity(path.stem)] = str(exc)
+            if isinstance(exc, VerifiedNoteError):
+                verified.update((path.name.casefold(), concept_identity(path.stem)))
             continue
         identity = concept_identity(existing.concept.title)
         if identity in by_identity:
@@ -251,7 +262,7 @@ def _existing_index(
             continue
         by_identity[identity] = existing
         filename_owners[path.name.casefold()] = identity
-    return by_identity, filename_owners, protected_filenames, protected_identities
+    return by_identity, filename_owners, protected_filenames, protected_identities, verified
 
 
 def _attach_provenance(concept: Concept, source_link: str, chunk_id: str) -> None:
@@ -1103,6 +1114,7 @@ def _build_and_apply_plan(
         filename_owners,
         protected_filenames,
         protected_identities,
+        verified,
     ) = _existing_index(output_root, plan)
     jobs: list[tuple[str, Concept, Path, ExistingConcept | None]] = []
     blocked_identities: set[str] = set()
@@ -1112,6 +1124,14 @@ def _build_and_apply_plan(
         filename_key = filename.casefold()
         existing = existing_by_identity.get(identity)
         path = existing.path if existing else output_root / filename
+        if identity in verified or filename_key in verified:
+            # A verified note already holds this concept. It stays as it is, and the
+            # Source still counts as processed; otherwise it would be redone forever.
+            plan.warnings.append(
+                f"Verified concept left unchanged for {concept.title!r}; "
+                "evidence from this run was not added to it"
+            )
+            continue
         if identity in protected_identities:
             plan.warnings.append(
                 f"Protected concept identity skipped for {concept.title!r}: "

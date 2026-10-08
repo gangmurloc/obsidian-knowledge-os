@@ -7,7 +7,13 @@ from typing import Any
 
 import yaml
 
-from .models import Concept, Evidence, ExistingConcept, ProtectedNoteError
+from .models import (
+    Concept,
+    Evidence,
+    ExistingConcept,
+    ProtectedNoteError,
+    VerifiedNoteError,
+)
 from .schema import concept_identity, sanitize_concept_title
 from .source import parse_markdown_frontmatter
 
@@ -98,7 +104,7 @@ def load_existing_concept(path: Path) -> ExistingConcept:
             f"existing target {path.name} is not knowledge_status: processed"
         )
     if metadata.get("human_verified") is not False:
-        raise ProtectedNoteError(f"existing target {path.name} is human-verified")
+        raise VerifiedNoteError(f"existing target {path.name} is human-verified")
     missing = MANAGED_PROPERTIES - set(metadata)
     if missing:
         raise ProtectedNoteError(

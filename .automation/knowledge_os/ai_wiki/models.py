@@ -25,6 +25,10 @@ class ProtectedNoteError(AIWikiError):
     """A target note is human-owned or otherwise outside the write boundary."""
 
 
+class VerifiedNoteError(ProtectedNoteError):
+    """A target is an AI-owned concept note that was verified and must stay unchanged."""
+
+
 @dataclass(frozen=True)
 class SourceNote:
     path: Path

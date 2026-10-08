@@ -197,7 +197,60 @@ class VerifyTests(unittest.TestCase):
         plan = self._scan(excerpts=(IN_SOURCE,))
 
         self.assertEqual(self.note.read_bytes(), marked)
-        self.assertTrue(any("Protected concept" in warning for warning in plan.warnings))
+        self.assertEqual(
+            [warning for warning in plan.warnings if "Self-Attention" in warning],
+            [
+                "Verified concept left unchanged for 'Self-Attention'; "
+                "evidence from this run was not added to it"
+            ],
+        )
+        self.assertEqual(plan.changes, [])
+
+    def test_source_whose_concept_is_verified_still_counts_as_processed(self):
+        self._mark()
+        self.source.write_text(
+            self.source.read_text(encoding="utf-8") + "\nNew evidence.\n",
+            encoding="utf-8",
+        )
+        self._scan(excerpts=(IN_SOURCE,))
+
+        untouched = FakeLLMProvider(response_texts=())
+        plan = process_ai_wiki(
+            vault_root=self.vault,
+            provider=untouched,
+            model_name=FAKE_MODEL,
+            scope=ScanScope("all"),
+            write=True,
+            today=TODAY,
+        )
+
+        self.assertEqual(untouched.requests, [])
+        self.assertIn("30_Resources/Sources/Papers/source-one.md: unchanged", plan.skipped)
+
+    def test_other_protected_targets_still_keep_the_source_unprocessed(self):
+        self.note.write_text(
+            "---\ntype: concept\norigin: me\n---\n# Self-Attention\n",
+            encoding="utf-8",
+        )
+        self.source.write_text(
+            self.source.read_text(encoding="utf-8") + "\nNew evidence.\n",
+            encoding="utf-8",
+        )
+
+        plan = self._scan(excerpts=(IN_SOURCE,))
+        again = FakeLLMProvider(
+            response_text=response(concept("Self-Attention", role="core_concept", excerpts=(IN_SOURCE,)))
+        )
+        process_ai_wiki(
+            vault_root=self.vault,
+            provider=again,
+            model_name=FAKE_MODEL,
+            scope=ScanScope("all"),
+            today=TODAY,
+        )
+
+        self.assertTrue(any("Protected concept identity" in warning for warning in plan.warnings))
+        self.assertEqual(len(again.requests), 1)
 
     def test_cli_checks_by_default_and_marks_with_write_and_reviewer(self):
         before = self.note.read_bytes()
